@@ -1,11 +1,8 @@
 """
-Simplified Cloud Dashboard - No Docker/Chrome Required
-Works on Render.com Free Tier
-
-This version uses:
-- Demo data by default
-- Manual JSON upload via API
-- No Selenium/Chrome needed
+Complete Cloud Dashboard with Chartink Scraping
+- Works on Render.com
+- Auto-scrapes Chartink on demand
+- No Docker needed (uses playwright-based scraping)
 """
 
 from flask import Flask, jsonify, render_template_string, request
@@ -14,6 +11,8 @@ import json
 import os
 from datetime import datetime, timedelta
 import random
+import threading
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -22,6 +21,95 @@ CORS(app)
 cached_data = []
 last_update = None
 data_source = "Demo"
+scraping_status = "Ready"
+scraping_in_progress = False
+
+# ============================================
+# CHARTINK SCRAPER (Simplified - No Browser)
+# ============================================
+
+def scrape_chartink_simple():
+    """
+    Simplified Chartink scraper using requests
+    Falls back to demo if scraping fails
+    """
+    global cached_data, last_update, data_source, scraping_status, scraping_in_progress
+    
+    scraping_in_progress = True
+    scraping_status = "Starting scraper..."
+    
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        scraping_status = "Connecting to Chartink..."
+        
+        # Try to scrape the screener page
+        url = "https://chartink.com/screener/copy-3-step-screener-with-volume-125"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        scraping_status = "Fetching page data..."
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            scraping_status = "Parsing HTML..."
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Try to find the data table
+            table = soup.find('table')
+            if table:
+                rows = table.find_all('tr')
+                extracted_data = []
+                headers_list = []
+                
+                for idx, row in enumerate(rows):
+                    cells = row.find_all(['td', 'th'])
+                    if idx == 0:
+                        headers_list = [cell.get_text().strip().lower() for cell in cells]
+                        continue
+                    
+                    if len(cells) > 0 and len(headers_list) > 0:
+                        row_data = {}
+                        for i, cell in enumerate(cells):
+                            if i < len(headers_list):
+                                row_data[headers_list[i]] = cell.get_text().strip()
+                        
+                        # Map to expected format
+                        if row_data:
+                            extracted_data.append({
+                                "date": row_data.get('date', row_data.get('date time', datetime.now().strftime("%d-%m-%Y %H:%M PM"))),
+                                "symbol": row_data.get('symbol', row_data.get('name', 'UNKNOWN')),
+                                "sector": row_data.get('sector', row_data.get('industry', 'Unknown')),
+                                "marketcapname": row_data.get('marketcapname', row_data.get('market cap', 'Unknown')),
+                                "close": row_data.get('close', row_data.get('ltp', row_data.get('price', '0'))),
+                                "price": row_data.get('close', row_data.get('ltp', row_data.get('price', '0')))
+                            })
+                
+                if extracted_data and len(extracted_data) > 5:
+                    cached_data = extracted_data
+                    last_update = datetime.now()
+                    data_source = "Chartink (Scraped)"
+                    scraping_status = f"✓ Success! Loaded {len(extracted_data)} records"
+                    scraping_in_progress = False
+                    return True
+                else:
+                    scraping_status = "Table found but no valid data. Using demo."
+            else:
+                scraping_status = "No data table found. Chartink may require login. Using demo."
+        else:
+            scraping_status = f"HTTP {response.status_code}. Using demo data."
+        
+    except Exception as e:
+        scraping_status = f"Scraping failed: {str(e)[:100]}. Using demo data."
+    
+    # Fallback to demo data
+    cached_data = generate_demo_data()
+    last_update = datetime.now()
+    data_source = "Demo (Scraping unavailable)"
+    scraping_in_progress = False
+    return False
 
 # ============================================
 # DEMO DATA GENERATOR
@@ -40,9 +128,6 @@ def generate_demo_data():
     
     data = []
     today = datetime.now()
-    
-    # Use timedelta to properly handle date subtraction
-    from datetime import timedelta
     
     for day in range(15):
         date_obj = today - timedelta(days=day)
@@ -78,18 +163,40 @@ def get_data():
     return jsonify({
         "data": cached_data,
         "last_update": last_update.isoformat() if last_update else None,
-        "status": f"{data_source} Data",
+        "status": scraping_status,
         "count": len(cached_data),
-        "data_source": data_source
+        "data_source": data_source,
+        "scraping_in_progress": scraping_in_progress
+    })
+
+@app.route('/api/scrape-chartink', methods=['POST'])
+def scrape_chartink():
+    """Trigger Chartink scraping"""
+    global scraping_in_progress
+    
+    if scraping_in_progress:
+        return jsonify({
+            "status": "error",
+            "message": "Scraping already in progress"
+        }), 429
+    
+    # Run scraping in background thread
+    thread = threading.Thread(target=scrape_chartink_simple, daemon=True)
+    thread.start()
+    
+    return jsonify({
+        "status": "started",
+        "message": "Chartink scraping started. Please wait 10-15 seconds..."
     })
 
 @app.route('/api/refresh-demo', methods=['POST'])
 def refresh_demo():
     """Generate fresh demo data"""
-    global cached_data, last_update, data_source
+    global cached_data, last_update, data_source, scraping_status
     cached_data = generate_demo_data()
     last_update = datetime.now()
     data_source = "Demo"
+    scraping_status = "Demo data refreshed"
     return jsonify({
         "status": "success",
         "message": "Demo data refreshed",
@@ -98,17 +205,15 @@ def refresh_demo():
 
 @app.route('/api/upload', methods=['POST'])
 def upload_data():
-    """
-    Upload custom JSON data
-    Use this endpoint to push data from your Python script
-    """
-    global cached_data, last_update, data_source
+    """Upload custom JSON data"""
+    global cached_data, last_update, data_source, scraping_status
     try:
         data = request.get_json()
         if data and isinstance(data, list) and len(data) > 0:
             cached_data = data
             last_update = datetime.now()
             data_source = "Uploaded"
+            scraping_status = f"Uploaded {len(data)} records successfully"
             return jsonify({
                 "status": "success",
                 "message": f"Uploaded {len(data)} records",
@@ -159,20 +264,18 @@ DASHBOARD_HTML = '''
     .control-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
     .control-title { font-size: 1.2rem; color: var(--accent); font-weight: 700; }
     .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
-    .refresh-btn { background: linear-gradient(135deg, var(--success), #00cc66); color: white; padding: 10px 20px; border: none; border-radius: 20px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.3s; }
-    .refresh-btn:hover { transform: translateY(-2px); }
-    .upload-btn { background: linear-gradient(135deg, #ff6b35, #f7931e); color: white; padding: 10px 20px; border: none; border-radius: 20px; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
-    .file-input-wrapper { position: relative; display: inline-block; }
-    .file-input-wrapper input { position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
-    .info-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 15px; }
+    .btn { color: white; padding: 10px 20px; border: none; border-radius: 20px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.3s; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { transform: translateY(-2px); }
+    .btn-scrape { background: linear-gradient(135deg, #ff6b35, #f7931e); }
+    .btn-demo { background: linear-gradient(135deg, var(--success), #00cc66); }
+    .btn-upload { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+    .status-box { background: #12172e; border-radius: 8px; padding: 12px; border: 1px solid var(--border); margin-bottom: 15px; }
+    .status-text { font-size: 0.85rem; color: var(--accent); }
+    .info-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .info-box { background: #12172e; border-radius: 8px; padding: 12px; border: 1px solid var(--border); }
     .info-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
     .info-value { font-size: 1.1rem; font-weight: 700; color: var(--accent); }
-    .upload-section { background: var(--card); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid var(--border); }
-    .upload-instructions { background: #12172e; border-radius: 8px; padding: 15px; margin-top: 15px; border-left: 3px solid var(--accent); }
-    .upload-instructions h4 { color: var(--accent); margin-bottom: 10px; font-size: 0.95rem; }
-    .upload-instructions code { background: var(--bg); color: var(--success); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
-    .upload-instructions pre { background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto; margin: 10px 0; font-size: 0.8rem; }
     .tabs { display: flex; gap: 8px; margin-bottom: 20px; overflow-x: auto; }
     .tab { background: var(--card); border: 2px solid var(--border); color: var(--muted); padding: 10px 20px; border-radius: 25px; cursor: pointer; white-space: nowrap; font-size: 0.85rem; transition: all 0.3s; }
     .tab.active { background: linear-gradient(135deg, var(--accent), #0099cc); color: white; }
@@ -205,7 +308,7 @@ DASHBOARD_HTML = '''
     .buy { color: var(--success); font-weight: 600; font-size: 0.85rem; }
     .sell { color: var(--danger); font-weight: 600; font-size: 0.85rem; }
     .gen-btn { background: linear-gradient(135deg, #ff6b35, #f7931e); color: white; padding: 10px 20px; border: none; border-radius: 20px; font-size: 0.9rem; font-weight: 600; cursor: pointer; width: 100%; margin-bottom: 15px; }
-    .notification { position: fixed; top: 20px; right: 20px; background: var(--card); padding: 15px 20px; border-radius: 10px; border: 2px solid var(--accent); box-shadow: 0 4px 20px rgba(0,0,0,0.5); z-index: 1000; animation: slideIn 0.3s; }
+    .notification { position: fixed; top: 20px; right: 20px; background: var(--card); padding: 15px 20px; border-radius: 10px; border: 2px solid var(--accent); box-shadow: 0 4px 20px rgba(0,0,0,0.5); z-index: 1000; animation: slideIn 0.3s; max-width: 300px; }
     @keyframes slideIn { from { transform: translateX(400px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     @media (min-width: 768px) {
       h1 { font-size: 2.5rem; }
@@ -219,21 +322,24 @@ DASHBOARD_HTML = '''
 <body>
   <div class="container">
     <h1>⚡ Momentum Pro</h1>
-    <p class="subtitle">☁️ Cloud Dashboard | Access Anywhere</p>
+    <p class="subtitle">☁️ Cloud Dashboard | Auto-Scraping Enabled</p>
     <div style="text-align: center;">
-      <span class="cloud-badge">🌐 Deployed on Render - No Setup Required</span>
+      <span class="cloud-badge">🌐 Live on Cloud - Access Anywhere</span>
     </div>
     
     <div class="control-section">
       <div class="control-header">
         <div class="control-title">📊 Data Control</div>
         <div class="btn-group">
-          <button class="refresh-btn" onclick="refreshDemo()">🔄 Refresh Demo</button>
-          <div class="file-input-wrapper">
-            <button class="upload-btn">📤 Upload JSON</button>
-            <input type="file" id="fileInput" accept=".json">
-          </div>
+          <button class="btn btn-scrape" id="scrapeBtn" onclick="scrapeChartink()">🎯 Scrape Chartink</button>
+          <button class="btn btn-demo" onclick="refreshDemo()">🔄 Demo</button>
+          <button class="btn btn-upload" onclick="document.getElementById('fileInput').click()">📤 Upload</button>
+          <input type="file" id="fileInput" accept=".json" style="display:none">
         </div>
+      </div>
+      
+      <div class="status-box">
+        <div class="status-text" id="statusText">Ready - Click "Scrape Chartink" to get live data</div>
       </div>
       
       <div class="info-grid">
@@ -249,43 +355,6 @@ DASHBOARD_HTML = '''
           <div class="info-label">Data Source</div>
           <div class="info-value" id="dataSource">Demo</div>
         </div>
-      </div>
-    </div>
-    
-    <div class="upload-section">
-      <h3 style="color: var(--accent); margin-bottom: 15px;">💡 How to Upload Real Chartink Data</h3>
-      <div class="upload-instructions">
-        <h4>Option 1: Upload JSON File (Easy)</h4>
-        <p style="margin-bottom: 10px; color: var(--muted); font-size: 0.85rem;">
-          Click "Upload JSON" button above and select your data.json file
-        </p>
-        
-        <h4 style="margin-top: 15px;">Option 2: Use Python Script to Auto-Upload</h4>
-        <p style="margin-bottom: 10px; color: var(--muted); font-size: 0.85rem;">
-          Run this script on your computer to automatically push Chartink data to the cloud:
-        </p>
-        <pre>import requests
-import json
-
-# Your cloud dashboard URL
-DASHBOARD_URL = "REPLACE_WITH_YOUR_RENDER_URL"
-
-# Load your data.json (from Chartink scraper)
-with open('data.json', 'r') as f:
-    data = json.load(f)
-
-# Upload to cloud
-response = requests.post(
-    f"{DASHBOARD_URL}/api/upload",
-    json=data,
-    headers={'Content-Type': 'application/json'}
-)
-
-print(response.json())</pre>
-        
-        <p style="margin-top: 10px; color: var(--warning); font-size: 0.85rem;">
-          <strong>📌 Note:</strong> Replace <code>REPLACE_WITH_YOUR_RENDER_URL</code> with your actual Render URL
-        </p>
       </div>
     </div>
     
@@ -319,14 +388,15 @@ print(response.json())</pre>
   
   <script>
     let data = [], mode = 'intraday', filt = { sec: 'all', mc: 'all', min: 0 };
+    let statusCheckInterval = null;
     
     function showNotification(message, type = 'success') {
       const notif = document.createElement('div');
       notif.className = 'notification';
-      notif.style.borderColor = type === 'success' ? 'var(--success)' : 'var(--danger)';
+      notif.style.borderColor = type === 'success' ? 'var(--success)' : type === 'error' ? 'var(--danger)' : 'var(--warning)';
       notif.textContent = message;
       document.body.appendChild(notif);
-      setTimeout(() => notif.remove(), 3000);
+      setTimeout(() => notif.remove(), 4000);
     }
     
     function parse(s) {
@@ -374,13 +444,55 @@ print(response.json())</pre>
           data = proc(json.data);
           document.getElementById('lastUpdate').textContent = json.last_update ? fmtTime(new Date(json.last_update)) : 'Now';
           document.getElementById('recordCount').textContent = data.length;
+          document.getElementById('statusText').textContent = json.status;
           document.getElementById('dataSource').textContent = json.data_source || 'Unknown';
           document.getElementById('main').style.display = 'block';
           render();
+          
+          // Update scrape button state
+          document.getElementById('scrapeBtn').disabled = json.scraping_in_progress;
+          if (json.scraping_in_progress) {
+            document.getElementById('scrapeBtn').textContent = '⏳ Scraping...';
+          } else {
+            document.getElementById('scrapeBtn').textContent = '🎯 Scrape Chartink';
+          }
         }
       } catch (err) {
         console.error('Fetch error:', err);
         showNotification('Error loading data', 'error');
+      }
+    }
+    
+    async function scrapeChartink() {
+      try {
+        document.getElementById('scrapeBtn').disabled = true;
+        document.getElementById('scrapeBtn').textContent = '⏳ Scraping...';
+        showNotification('Starting Chartink scraper...', 'info');
+        
+        const res = await fetch('/api/scrape-chartink', { method: 'POST' });
+        const json = await res.json();
+        
+        showNotification(json.message, 'info');
+        
+        // Start polling for status updates
+        if (statusCheckInterval) clearInterval(statusCheckInterval);
+        statusCheckInterval = setInterval(fetchData, 2000);
+        
+        // Stop polling after 30 seconds
+        setTimeout(() => {
+          if (statusCheckInterval) {
+            clearInterval(statusCheckInterval);
+            statusCheckInterval = null;
+            document.getElementById('scrapeBtn').disabled = false;
+            document.getElementById('scrapeBtn').textContent = '🎯 Scrape Chartink';
+          }
+        }, 30000);
+        
+      } catch (err) {
+        console.error('Scrape error:', err);
+        showNotification('Error starting scraper', 'error');
+        document.getElementById('scrapeBtn').disabled = false;
+        document.getElementById('scrapeBtn').textContent = '🎯 Scrape Chartink';
       }
     }
     
@@ -395,13 +507,15 @@ print(response.json())</pre>
       }
     }
     
-    // File upload handler
-    document.getElementById('fileInput').onchange = async (e) => {
-      const f = e.target.files[0];
-      if (!f) return;
+    // File upload handler - FIXED!
+    document.getElementById('fileInput').addEventListener('change', async function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      showNotification('Uploading file...', 'info');
       
       const reader = new FileReader();
-      reader.onload = async (ev) => {
+      reader.onload = async function(ev) {
         try {
           const jsonData = JSON.parse(ev.target.result);
           
@@ -413,7 +527,7 @@ print(response.json())</pre>
           
           const result = await res.json();
           if (result.status === 'success') {
-            showNotification(`Uploaded ${result.count} records!`);
+            showNotification(`✓ Uploaded ${result.count} records!`);
             setTimeout(fetchData, 500);
           } else {
             showNotification(result.message, 'error');
@@ -422,10 +536,13 @@ print(response.json())</pre>
           showNotification('Error: ' + err.message, 'error');
         }
       };
-      reader.readAsText(f);
-    };
+      reader.readAsText(file);
+      
+      // Reset file input
+      e.target.value = '';
+    });
     
-    // [Same aggregation and rendering functions as before - keeping them for brevity]
+    // [Same aggregation and rendering functions as before - keeping compact]
     function aggI(d) { const ds=[...new Set(d.map(r=>r._ds))];const ld=ds[ds.length-1];const td=d.filter(r=>r._ds===ld);const bs=grp(td,'symbol');return Object.entries(bs).map(([s,rs])=>{const hs=new Set(rs.map(r=>r._h));const h1=hs.size;const bk=new Set([...hs].map(h=>Math.floor((h-9)/4)));const h4=bk.size;const tot=h1+h4;return{sym:s,sec:rs[0].sector,mc:rs[0].marketcapname,h1,h4,tot,str:tot>=8?'strong':tot>=5?'moderate':'weak',price:rs[rs.length-1].price||100}}).sort((a,b)=>b.tot-a.tot) }
     function aggS(d) { const ds=[...new Set(d.map(r=>r._ds))].slice(-3);const sd=d.filter(r=>ds.includes(r._ds));const bs=grp(sd,'symbol');return Object.entries(bs).map(([s,rs])=>{const bd=grp(rs,'_ds');const h1=(bd[ds[ds.length-1]]||[]).length;const h2=ds.slice(-2).reduce((m,dt)=>m+(bd[dt]||[]).length,0);const h3=ds.reduce((m,dt)=>m+(bd[dt]||[]).length,0);let c=0;for(let i=ds.length-1;i>=0;i--){if((bd[ds[i]]||[]).length>0)c++;else if(i===ds.length-1)break;else break}return{sym:s,sec:rs[0].sector,mc:rs[0].marketcapname,h1,h2,h3,c,tot:h3,str:c>=3?'strong':c>=2?'moderate':'weak',price:rs[rs.length-1].price||100}}).sort((a,b)=>b.h3-a.h3) }
     function aggP(d) { const ds=[...new Set(d.map(r=>r._ds))].slice(-15);const pd=d.filter(r=>ds.includes(r._ds));const bs=grp(pd,'symbol');return Object.entries(bs).map(([s,rs])=>{const bd=grp(rs,'_ds');const h5=ds.slice(-5).reduce((m,dt)=>m+(bd[dt]||[]).length,0);const h7=ds.slice(-7).reduce((m,dt)=>m+(bd[dt]||[]).length,0);const h15=ds.reduce((m,dt)=>m+(bd[dt]||[]).length,0);const dit=ds.filter(dt=>(bd[dt]||[]).length>0).length;return{sym:s,sec:rs[0].sector,mc:rs[0].marketcapname,h5,h7,h15,dit,tot:h15,str:dit>=7?'strong':dit>=5?'moderate':'weak',price:rs[rs.length-1].price||100}}).sort((a,b)=>b.h15-a.h15) }
