@@ -12,7 +12,7 @@ from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 
 app = Flask(__name__)
@@ -41,8 +41,11 @@ def generate_demo_data():
     data = []
     today = datetime.now()
     
+    # Use timedelta to properly handle date subtraction
+    from datetime import timedelta
+    
     for day in range(15):
-        date_obj = datetime(today.year, today.month, today.day - day)
+        date_obj = today - timedelta(days=day)
         for hour in range(9, 16):
             num_symbols = random.randint(8, 15)
             selected_symbols = random.sample(symbols, num_symbols)
@@ -465,4 +468,3 @@ print(response.json())</pre>
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
