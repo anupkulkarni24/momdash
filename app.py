@@ -1,587 +1,358 @@
+#!/usr/bin/env python3
 """
-Complete Cloud Dashboard with Chartink Scraping
-- Works on Render.com
-- Auto-scrapes Chartink on demand
-- No Docker needed (uses playwright-based scraping)
+Auto Upload to Cloud Dashboard
+Run this on your computer - it will:
+1. Scrape Chartink (with your browser login session)
+2. Automatically upload to your cloud dashboard
+3. Keep dashboard updated every 15 minutes
+
+Replace YOUR_RENDER_URL with your actual Render URL
 """
 
-from flask import Flask, jsonify, render_template_string, request
-from flask_cors import CORS
+import time
+import csv
 import json
 import os
-from datetime import datetime, timedelta
-import random
-import threading
-import time
-
-app = Flask(__name__)
-CORS(app)
-
-# Global data storage
-cached_data = []
-last_update = None
-data_source = "Demo"
-scraping_status = "Ready"
-scraping_in_progress = False
+import shutil
+import requests
+from pathlib import Path
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import WebDriverException, NoSuchElementException
 
 # ============================================
-# CHARTINK SCRAPER (Simplified - No Browser)
+# CONFIGURATION
 # ============================================
 
-def scrape_chartink_simple():
+# REPLACE THIS WITH YOUR RENDER URL!
+CLOUD_DASHBOARD_URL = "https://your-app-name.onrender.com"  # ⚠️ CHANGE THIS!
+
+CHARTINK_SCREENER_URL = "https://chartink.com/screener/copy-3-step-screener-with-volume-125"
+REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
+DOWNLOAD_DIR = Path(__file__).resolve().parent / "downloads"
+DOWNLOAD_DIR.mkdir(exist_ok=True)
+CSV_NAME = "screener.csv"
+CHROMEDRIVER_PATH = shutil.which("chromedriver") or ""
+HEADLESS = False  # Keep False to see browser and login
+DOWNLOAD_TIMEOUT = 40
+
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+def log(msg: str):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+def make_chrome_options(download_dir: str) -> Options:
+    opts = Options()
+    if HEADLESS:
+        opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1400,900")
+    
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "profile.default_content_settings.popups": 0,
+        "safebrowsing.enabled": True,
+    }
+    opts.add_experimental_option("prefs", prefs)
+    return opts
+
+def start_driver() -> webdriver.Chrome:
+    if CHROMEDRIVER_PATH:
+        service = ChromeService(executable_path=CHROMEDRIVER_PATH)
+    else:
+        service = ChromeService()
+    
+    options = make_chrome_options(str(DOWNLOAD_DIR.resolve()))
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
+
+def wait_for_login(driver: webdriver.Chrome, timeout: int = 300):
     """
-    Simplified Chartink scraper using requests
-    Falls back to demo if scraping fails
+    Wait for user to login manually
+    Checks if we're still on login page
     """
-    global cached_data, last_update, data_source, scraping_status, scraping_in_progress
+    log("⏳ Waiting for you to login to Chartink...")
+    log("   Please login in the browser window")
+    log("   Script will continue automatically after login")
     
-    scraping_in_progress = True
-    scraping_status = "Starting scraper..."
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            current_url = driver.current_url
+            # If we're no longer on login page, assume logged in
+            if "login" not in current_url.lower() and "chartink.com" in current_url:
+                log("✓ Login detected! Continuing...")
+                return True
+            time.sleep(2)
+        except:
+            pass
     
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-        
-        scraping_status = "Connecting to Chartink..."
-        
-        # Try to scrape the screener page
-        url = "https://chartink.com/screener/copy-3-step-screener-with-volume-125"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        scraping_status = "Fetching page data..."
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            scraping_status = "Parsing HTML..."
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Try to find the data table
-            table = soup.find('table')
-            if table:
-                rows = table.find_all('tr')
-                extracted_data = []
-                headers_list = []
-                
-                for idx, row in enumerate(rows):
-                    cells = row.find_all(['td', 'th'])
-                    if idx == 0:
-                        headers_list = [cell.get_text().strip().lower() for cell in cells]
-                        continue
-                    
-                    if len(cells) > 0 and len(headers_list) > 0:
-                        row_data = {}
-                        for i, cell in enumerate(cells):
-                            if i < len(headers_list):
-                                row_data[headers_list[i]] = cell.get_text().strip()
-                        
-                        # Map to expected format
-                        if row_data:
-                            extracted_data.append({
-                                "date": row_data.get('date', row_data.get('date time', datetime.now().strftime("%d-%m-%Y %H:%M PM"))),
-                                "symbol": row_data.get('symbol', row_data.get('name', 'UNKNOWN')),
-                                "sector": row_data.get('sector', row_data.get('industry', 'Unknown')),
-                                "marketcapname": row_data.get('marketcapname', row_data.get('market cap', 'Unknown')),
-                                "close": row_data.get('close', row_data.get('ltp', row_data.get('price', '0'))),
-                                "price": row_data.get('close', row_data.get('ltp', row_data.get('price', '0')))
-                            })
-                
-                if extracted_data and len(extracted_data) > 5:
-                    cached_data = extracted_data
-                    last_update = datetime.now()
-                    data_source = "Chartink (Scraped)"
-                    scraping_status = f"✓ Success! Loaded {len(extracted_data)} records"
-                    scraping_in_progress = False
-                    return True
-                else:
-                    scraping_status = "Table found but no valid data. Using demo."
-            else:
-                scraping_status = "No data table found. Chartink may require login. Using demo."
-        else:
-            scraping_status = f"HTTP {response.status_code}. Using demo data."
-        
-    except Exception as e:
-        scraping_status = f"Scraping failed: {str(e)[:100]}. Using demo data."
-    
-    # Fallback to demo data
-    cached_data = generate_demo_data()
-    last_update = datetime.now()
-    data_source = "Demo (Scraping unavailable)"
-    scraping_in_progress = False
+    log("⚠️ Timeout waiting for login")
     return False
 
-# ============================================
-# DEMO DATA GENERATOR
-# ============================================
-
-def generate_demo_data():
-    """Generate realistic demo data"""
-    symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 
-               'ITC', 'KOTAKBANK', 'LT', 'AXISBANK', 'TATAMOTORS', 'WIPRO', 'MARUTI', 
-               'BAJFINANCE', 'TATASTEEL', 'ASIANPAINT', 'TITAN', 'NESTLEIND', 'ULTRACEMCO',
-               'HINDUNILVR', 'ADANIENT', 'BAJAJFINSV', 'SUNPHARMA', 'ONGC', 'NTPC', 
-               'POWERGRID', 'M&M', 'TECHM', 'HINDALCO', 'HCLTECH', 'DRREDDY', 'CIPLA',
-               'HEROMOTOCO', 'EICHERMOT', 'GRASIM', 'JSWSTEEL', 'INDUSINDBK', 'VEDL']
-    sectors = ['Banking', 'IT', 'Auto', 'Pharma', 'FMCG', 'Metals', 'Energy', 'Telecom', 'Infrastructure']
-    mcaps = ['Large Cap', 'Mid Cap', 'Small Cap']
+def download_chartink_csv(driver: webdriver.Chrome = None) -> Path | None:
+    """
+    Download CSV from Chartink using browser session
+    """
+    should_quit = False
+    if driver is None:
+        driver = start_driver()
+        should_quit = True
     
-    data = []
-    today = datetime.now()
-    
-    for day in range(15):
-        date_obj = today - timedelta(days=day)
-        for hour in range(9, 16):
-            num_symbols = random.randint(8, 15)
-            selected_symbols = random.sample(symbols, num_symbols)
-            for symbol in selected_symbols:
-                price = random.uniform(100, 3000)
-                data.append({
-                    "date": f"{date_obj.day:02d}-{date_obj.month:02d}-{date_obj.year} {hour:02d}:{random.randint(0, 59):02d} {'PM' if hour >= 12 else 'AM'}",
-                    "symbol": symbol,
-                    "sector": random.choice(sectors),
-                    "marketcapname": random.choice(mcaps),
-                    "close": f"{price:.2f}",
-                    "price": f"{price:.2f}"
-                })
-    return data
-
-# Initialize with demo data
-cached_data = generate_demo_data()
-last_update = datetime.now()
-
-# ============================================
-# API ENDPOINTS
-# ============================================
-
-@app.route('/')
-def index():
-    return render_template_string(DASHBOARD_HTML)
-
-@app.route('/api/data')
-def get_data():
-    return jsonify({
-        "data": cached_data,
-        "last_update": last_update.isoformat() if last_update else None,
-        "status": scraping_status,
-        "count": len(cached_data),
-        "data_source": data_source,
-        "scraping_in_progress": scraping_in_progress
-    })
-
-@app.route('/api/scrape-chartink', methods=['POST'])
-def scrape_chartink():
-    """Trigger Chartink scraping"""
-    global scraping_in_progress
-    
-    if scraping_in_progress:
-        return jsonify({
-            "status": "error",
-            "message": "Scraping already in progress"
-        }), 429
-    
-    # Run scraping in background thread
-    thread = threading.Thread(target=scrape_chartink_simple, daemon=True)
-    thread.start()
-    
-    return jsonify({
-        "status": "started",
-        "message": "Chartink scraping started. Please wait 10-15 seconds..."
-    })
-
-@app.route('/api/refresh-demo', methods=['POST'])
-def refresh_demo():
-    """Generate fresh demo data"""
-    global cached_data, last_update, data_source, scraping_status
-    cached_data = generate_demo_data()
-    last_update = datetime.now()
-    data_source = "Demo"
-    scraping_status = "Demo data refreshed"
-    return jsonify({
-        "status": "success",
-        "message": "Demo data refreshed",
-        "count": len(cached_data)
-    })
-
-@app.route('/api/upload', methods=['POST'])
-def upload_data():
-    """Upload custom JSON data"""
-    global cached_data, last_update, data_source, scraping_status
     try:
-        data = request.get_json()
-        if data and isinstance(data, list) and len(data) > 0:
-            cached_data = data
-            last_update = datetime.now()
-            data_source = "Uploaded"
-            scraping_status = f"Uploaded {len(data)} records successfully"
-            return jsonify({
-                "status": "success",
-                "message": f"Uploaded {len(data)} records",
-                "count": len(cached_data)
-            })
-        return jsonify({
-            "status": "error", 
-            "message": "Invalid data format. Expected non-empty JSON array"
-        }), 400
+        log("📊 Loading Chartink screener...")
+        driver.get(CHARTINK_SCREENER_URL)
+        time.sleep(5)
+        
+        # Check if we need to login
+        if "login" in driver.current_url.lower():
+            log("🔐 Login required!")
+            if not wait_for_login(driver):
+                log("❌ Login failed or timed out")
+                return None
+            
+            # Go back to screener after login
+            driver.get(CHARTINK_SCREENER_URL)
+            time.sleep(5)
+        
+        log("📜 Scrolling to backtest section...")
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(5)
+        
+        # Track existing files
+        before = set(DOWNLOAD_DIR.glob("*.csv"))
+        
+        log("🔍 Looking for download button...")
+        try:
+            download_btn = driver.find_element(
+                By.XPATH,
+                "//*[contains(normalize-space(text()), 'Download csv')]"
+            )
+            download_btn.click()
+            log("✓ Clicked download button")
+        except NoSuchElementException:
+            log("⚠️ Could not find download button")
+            return None
+        
+        # Wait for download
+        log("⏳ Waiting for CSV download...")
+        waited = 0
+        while waited < DOWNLOAD_TIMEOUT:
+            after = set(DOWNLOAD_DIR.glob("*.csv"))
+            new_files = after - before
+            if new_files:
+                latest = sorted(new_files, key=lambda p: p.stat().st_mtime)[-1]
+                dest = DOWNLOAD_DIR / CSV_NAME
+                try:
+                    latest.replace(dest)
+                except:
+                    shutil.copy2(latest, dest)
+                log(f"✓ CSV downloaded: {dest}")
+                return dest
+            time.sleep(1)
+            waited += 1
+        
+        log("⏰ Download timeout")
+        return None
+        
     except Exception as e:
-        return jsonify({
-            "status": "error", 
-            "message": str(e)
-        }), 500
+        log(f"❌ Error: {e}")
+        return None
+    finally:
+        if should_quit and driver:
+            driver.quit()
 
-@app.route('/api/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "healthy",
-        "records": len(cached_data),
-        "last_update": last_update.isoformat() if last_update else None
-    })
+def load_csv_to_json(csv_path: Path) -> list:
+    """
+    Convert CSV to JSON format
+    """
+    if not csv_path or not csv_path.exists():
+        return []
+    
+    log(f"📄 Reading CSV: {csv_path}")
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        
+        normalized = []
+        for r in rows:
+            item = {
+                "date": (
+                    r.get("date")
+                    or r.get("Date")
+                    or r.get("Date Time")
+                    or ""
+                ),
+                "symbol": (
+                    r.get("symbol")
+                    or r.get("Symbol")
+                    or r.get("SYMBOL")
+                    or ""
+                ),
+                "marketcapname": (
+                    r.get("marketcapname")
+                    or r.get("Marketcap")
+                    or r.get("Market Cap")
+                    or ""
+                ),
+                "sector": (
+                    r.get("sector")
+                    or r.get("Sector")
+                    or r.get("Industry")
+                    or ""
+                ),
+                "close": (
+                    r.get("close")
+                    or r.get("Close")
+                    or r.get("ltp")
+                    or r.get("LTP")
+                    or "0"
+                ),
+                "price": (
+                    r.get("close")
+                    or r.get("Close")
+                    or r.get("ltp")
+                    or r.get("LTP")
+                    or "0"
+                )
+            }
+            normalized.append(item)
+        
+        log(f"✓ Loaded {len(normalized)} rows from CSV")
+        return normalized
+    except Exception as e:
+        log(f"❌ Error reading CSV: {e}")
+        return []
+
+def upload_to_cloud(data: list) -> bool:
+    """
+    Upload data to cloud dashboard
+    """
+    if not data:
+        log("⚠️ No data to upload")
+        return False
+    
+    try:
+        log(f"☁️ Uploading {len(data)} records to cloud...")
+        
+        response = requests.post(
+            f"{CLOUD_DASHBOARD_URL}/api/upload",
+            json=data,
+            headers={'Content-Type': 'application/json'},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            log(f"✅ Upload successful! {result.get('count', 0)} records on cloud")
+            return True
+        else:
+            log(f"❌ Upload failed: HTTP {response.status_code}")
+            log(f"   Response: {response.text[:200]}")
+            return False
+            
+    except Exception as e:
+        log(f"❌ Upload error: {e}")
+        return False
+
+def update_cycle(driver: webdriver.Chrome = None) -> bool:
+    """
+    Complete update cycle: Download -> Convert -> Upload
+    """
+    log("=" * 60)
+    log("🔄 Starting update cycle")
+    log("=" * 60)
+    
+    # Download CSV
+    csv_path = download_chartink_csv(driver)
+    
+    if not csv_path:
+        log("⚠️ Using existing CSV if available...")
+        csv_path = DOWNLOAD_DIR / CSV_NAME
+        if not csv_path.exists():
+            log("❌ No CSV available")
+            return False
+    
+    # Convert to JSON
+    data = load_csv_to_json(csv_path)
+    
+    if not data:
+        log("❌ No data to upload")
+        return False
+    
+    # Upload to cloud
+    success = upload_to_cloud(data)
+    
+    if success:
+        log("=" * 60)
+        log("✅ Update cycle completed successfully!")
+        log("   Your cloud dashboard now has the latest data")
+        log("=" * 60)
+    else:
+        log("⚠️ Update cycle completed with errors")
+    
+    return success
 
 # ============================================
-# EMBEDDED DASHBOARD HTML
+# MAIN EXECUTION
 # ============================================
 
-DASHBOARD_HTML = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Momentum Dashboard Pro - Cloud</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    :root {
-      --bg: #0a0e27; --card: #1a1f3a; --accent: #00d4ff; --success: #00ff88;
-      --warning: #ffaa00; --danger: #ff4466; --text: #e4e9f7; --muted: #8b92b0; --border: #2a2f4a;
-    }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: linear-gradient(135deg, var(--bg) 0%, #050814 100%); color: var(--text); min-height: 100vh; padding: 15px; }
-    .container { max-width: 1800px; margin: 0 auto; }
-    h1 { font-size: 1.8rem; background: linear-gradient(135deg, var(--accent), var(--success)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; text-align: center; }
-    .subtitle { color: var(--muted); text-align: center; margin-bottom: 20px; font-size: 0.9rem; }
-    .cloud-badge { background: linear-gradient(135deg, var(--success), #00cc66); color: white; padding: 5px 15px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; display: inline-block; margin-bottom: 20px; }
-    .control-section { background: linear-gradient(135deg, #1a1f3a, #0f1420); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 2px solid var(--accent); }
-    .control-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
-    .control-title { font-size: 1.2rem; color: var(--accent); font-weight: 700; }
-    .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
-    .btn { color: white; padding: 10px 20px; border: none; border-radius: 20px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.3s; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn:hover:not(:disabled) { transform: translateY(-2px); }
-    .btn-scrape { background: linear-gradient(135deg, #ff6b35, #f7931e); }
-    .btn-demo { background: linear-gradient(135deg, var(--success), #00cc66); }
-    .btn-upload { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
-    .status-box { background: #12172e; border-radius: 8px; padding: 12px; border: 1px solid var(--border); margin-bottom: 15px; }
-    .status-text { font-size: 0.85rem; color: var(--accent); }
-    .info-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-    .info-box { background: #12172e; border-radius: 8px; padding: 12px; border: 1px solid var(--border); }
-    .info-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
-    .info-value { font-size: 1.1rem; font-weight: 700; color: var(--accent); }
-    .tabs { display: flex; gap: 8px; margin-bottom: 20px; overflow-x: auto; }
-    .tab { background: var(--card); border: 2px solid var(--border); color: var(--muted); padding: 10px 20px; border-radius: 25px; cursor: pointer; white-space: nowrap; font-size: 0.85rem; transition: all 0.3s; }
-    .tab.active { background: linear-gradient(135deg, var(--accent), #0099cc); color: white; }
-    .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 20px; }
-    .metric { background: var(--card); border-radius: 12px; padding: 15px; border: 1px solid var(--border); position: relative; }
-    .metric::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, var(--accent), var(--success)); }
-    .metric-label { color: var(--muted); font-size: 0.75rem; margin-bottom: 8px; text-transform: uppercase; }
-    .metric-value { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
-    .metric-sub { font-size: 0.75rem; color: var(--success); margin-top: 4px; }
-    .portfolio { background: linear-gradient(135deg, var(--card), #0f1420); border-radius: 12px; padding: 20px; border: 2px solid var(--accent); margin-bottom: 20px; }
-    .port-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
-    .port-title { font-size: 1.3rem; color: var(--accent); font-weight: 700; }
-    .cagr { background: linear-gradient(135deg, var(--success), #00cc66); color: white; padding: 8px 15px; border-radius: 20px; font-size: 1rem; font-weight: 700; }
-    .port-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
-    .port-card { background: #12172e; border-radius: 10px; padding: 15px; border: 1px solid var(--border); }
-    .table-box { background: var(--card); border-radius: 12px; padding: 20px; border: 1px solid var(--border); margin-bottom: 20px; overflow-x: auto; }
-    .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
-    .filter { display: flex; flex-direction: column; gap: 4px; }
-    .filter label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
-    .filter select, .filter input { background: #12172e; border: 1px solid var(--border); color: var(--text); padding: 8px; border-radius: 8px; font-size: 0.85rem; }
-    table { width: 100%; border-collapse: collapse; min-width: 800px; font-size: 0.85rem; }
-    th { padding: 10px 8px; text-align: left; color: var(--accent); text-transform: uppercase; font-size: 0.75rem; border-bottom: 2px solid var(--border); }
-    td { padding: 10px 8px; border-bottom: 1px solid var(--border); }
-    tr:hover { background: #12172e; }
-    .sym-link { color: var(--accent); text-decoration: none; font-weight: 600; }
-    .badge { display: inline-block; padding: 4px 10px; border-radius: 15px; font-size: 0.7rem; font-weight: 600; }
-    .badge.strong { background: rgba(0, 255, 136, 0.2); color: var(--success); border: 1px solid var(--success); }
-    .badge.moderate { background: rgba(255, 170, 0, 0.2); color: var(--warning); border: 1px solid var(--warning); }
-    .badge.weak { background: rgba(255, 68, 102, 0.2); color: var(--danger); border: 1px solid var(--danger); }
-    .buy { color: var(--success); font-weight: 600; font-size: 0.85rem; }
-    .sell { color: var(--danger); font-weight: 600; font-size: 0.85rem; }
-    .gen-btn { background: linear-gradient(135deg, #ff6b35, #f7931e); color: white; padding: 10px 20px; border: none; border-radius: 20px; font-size: 0.9rem; font-weight: 600; cursor: pointer; width: 100%; margin-bottom: 15px; }
-    .notification { position: fixed; top: 20px; right: 20px; background: var(--card); padding: 15px 20px; border-radius: 10px; border: 2px solid var(--accent); box-shadow: 0 4px 20px rgba(0,0,0,0.5); z-index: 1000; animation: slideIn 0.3s; max-width: 300px; }
-    @keyframes slideIn { from { transform: translateX(400px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-    @media (min-width: 768px) {
-      h1 { font-size: 2.5rem; }
-      .metrics { grid-template-columns: repeat(4, 1fr); }
-      .info-grid { grid-template-columns: repeat(3, 1fr); }
-      .filters { grid-template-columns: repeat(3, 1fr); }
-      .port-grid { grid-template-columns: repeat(2, 1fr); }
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>⚡ Momentum Pro</h1>
-    <p class="subtitle">☁️ Cloud Dashboard | Auto-Scraping Enabled</p>
-    <div style="text-align: center;">
-      <span class="cloud-badge">🌐 Live on Cloud - Access Anywhere</span>
-    </div>
+def main():
+    print("""
+╔════════════════════════════════════════════════════════════════╗
+║           AUTO UPLOAD TO CLOUD DASHBOARD                       ║
+║                                                                ║
+║  This script will:                                            ║
+║  1. Open Chartink in browser                                  ║
+║  2. Wait for you to login (if needed)                         ║
+║  3. Download backtest CSV                                     ║
+║  4. Upload to your cloud dashboard                            ║
+║  5. Repeat every 15 minutes                                   ║
+║                                                                ║
+║  Your dashboard URL:                                          ║
+║  {url:<60} ║
+╚════════════════════════════════════════════════════════════════╝
+    """.format(url=CLOUD_DASHBOARD_URL))
     
-    <div class="control-section">
-      <div class="control-header">
-        <div class="control-title">📊 Data Control</div>
-        <div class="btn-group">
-          <button class="btn btn-scrape" id="scrapeBtn" onclick="scrapeChartink()">🎯 Scrape Chartink</button>
-          <button class="btn btn-demo" onclick="refreshDemo()">🔄 Demo</button>
-          <button class="btn btn-upload" onclick="document.getElementById('fileInput').click()">📤 Upload</button>
-          <input type="file" id="fileInput" accept=".json" style="display:none">
-        </div>
-      </div>
-      
-      <div class="status-box">
-        <div class="status-text" id="statusText">Ready - Click "Scrape Chartink" to get live data</div>
-      </div>
-      
-      <div class="info-grid">
-        <div class="info-box">
-          <div class="info-label">Last Updated</div>
-          <div class="info-value" id="lastUpdate">Loading...</div>
-        </div>
-        <div class="info-box">
-          <div class="info-label">Records</div>
-          <div class="info-value" id="recordCount">0</div>
-        </div>
-        <div class="info-box">
-          <div class="info-label">Data Source</div>
-          <div class="info-value" id="dataSource">Demo</div>
-        </div>
-      </div>
-    </div>
+    if "your-app-name" in CLOUD_DASHBOARD_URL:
+        print("⚠️  WARNING: You need to update CLOUD_DASHBOARD_URL!")
+        print("   Edit the script and replace with your actual Render URL")
+        print()
+        input("Press Enter to continue anyway (will fail) or Ctrl+C to exit...")
     
-    <div id="main" style="display:none">
-      <div class="tabs">
-        <div class="tab active" onclick="switchMode('intraday')">⚡ Intraday</div>
-        <div class="tab" onclick="switchMode('swing')">📈 Swing</div>
-        <div class="tab" onclick="switchMode('positional')">🧭 Positional</div>
-      </div>
-      
-      <div id="metrics" class="metrics"></div>
-      <button class="gen-btn" onclick="genPort()">🚀 Generate Smart Portfolio</button>
-      
-      <div id="portfolio" class="portfolio" style="display:none">
-        <div class="port-header">
-          <div class="port-title">🎯 Portfolio</div>
-          <div class="cagr" id="cagrBadge">35% CAGR</div>
-        </div>
-        <div id="portContent" class="port-grid"></div>
-      </div>
-      
-      <div class="table-box">
-        <h3 style="color:var(--accent); margin-bottom: 15px;">🎯 <span id="title">Stocks</span></h3>
-        <div class="filters" id="filters"></div>
-        <div style="overflow-x: auto;">
-          <table><thead id="thead"></thead><tbody id="tbody"></tbody></table>
-        </div>
-      </div>
-    </div>
-  </div>
-  
-  <script>
-    let data = [], mode = 'intraday', filt = { sec: 'all', mc: 'all', min: 0 };
-    let statusCheckInterval = null;
+    # Start browser once (keeps login session)
+    log("🌐 Starting browser...")
+    driver = start_driver()
     
-    function showNotification(message, type = 'success') {
-      const notif = document.createElement('div');
-      notif.className = 'notification';
-      notif.style.borderColor = type === 'success' ? 'var(--success)' : type === 'error' ? 'var(--danger)' : 'var(--warning)';
-      notif.textContent = message;
-      document.body.appendChild(notif);
-      setTimeout(() => notif.remove(), 4000);
-    }
-    
-    function parse(s) {
-      if (!s) return null;
-      const p = s.split(' ');
-      if (p.length < 3) return null;
-      const [d, t, a] = p;
-      const [dy, m, y] = d.split('-').map(Number);
-      let [h, mn] = t.split(':').map(Number);
-      if (a && a.toLowerCase() === 'pm' && h !== 12) h += 12;
-      if (a && a.toLowerCase() === 'am' && h === 12) h = 0;
-      return new Date(y, m - 1, dy, h, mn);
-    }
-    
-    function fmt(d) {
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    }
-    
-    function fmtTime(d) {
-      return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-    }
-    
-    function grp(a, k) {
-      return a.reduce((r, i) => {
-        const g = typeof k === 'function' ? k(i) : i[k];
-        (r[g] = r[g] || []).push(i);
-        return r;
-      }, {});
-    }
-    
-    function proc(d) {
-      return d.map(r => {
-        const dt = parse(r.date);
-        const price = parseFloat(r.close || r.price || 0);
-        return { ...r, _d: dt, _ds: dt ? fmt(dt) : null, _h: dt ? dt.getHours() : null, price: price };
-      }).filter(r => r._d).sort((a, b) => a._d - b._d);
-    }
-    
-    async function fetchData() {
-      try {
-        const res = await fetch('/api/data');
-        const json = await res.json();
-        
-        if (json.data && json.data.length > 0) {
-          data = proc(json.data);
-          document.getElementById('lastUpdate').textContent = json.last_update ? fmtTime(new Date(json.last_update)) : 'Now';
-          document.getElementById('recordCount').textContent = data.length;
-          document.getElementById('statusText').textContent = json.status;
-          document.getElementById('dataSource').textContent = json.data_source || 'Unknown';
-          document.getElementById('main').style.display = 'block';
-          render();
-          
-          // Update scrape button state
-          document.getElementById('scrapeBtn').disabled = json.scraping_in_progress;
-          if (json.scraping_in_progress) {
-            document.getElementById('scrapeBtn').textContent = '⏳ Scraping...';
-          } else {
-            document.getElementById('scrapeBtn').textContent = '🎯 Scrape Chartink';
-          }
-        }
-      } catch (err) {
-        console.error('Fetch error:', err);
-        showNotification('Error loading data', 'error');
-      }
-    }
-    
-    async function scrapeChartink() {
-      try {
-        document.getElementById('scrapeBtn').disabled = true;
-        document.getElementById('scrapeBtn').textContent = '⏳ Scraping...';
-        showNotification('Starting Chartink scraper...', 'info');
-        
-        const res = await fetch('/api/scrape-chartink', { method: 'POST' });
-        const json = await res.json();
-        
-        showNotification(json.message, 'info');
-        
-        // Start polling for status updates
-        if (statusCheckInterval) clearInterval(statusCheckInterval);
-        statusCheckInterval = setInterval(fetchData, 2000);
-        
-        // Stop polling after 30 seconds
-        setTimeout(() => {
-          if (statusCheckInterval) {
-            clearInterval(statusCheckInterval);
-            statusCheckInterval = null;
-            document.getElementById('scrapeBtn').disabled = false;
-            document.getElementById('scrapeBtn').textContent = '🎯 Scrape Chartink';
-          }
-        }, 30000);
-        
-      } catch (err) {
-        console.error('Scrape error:', err);
-        showNotification('Error starting scraper', 'error');
-        document.getElementById('scrapeBtn').disabled = false;
-        document.getElementById('scrapeBtn').textContent = '🎯 Scrape Chartink';
-      }
-    }
-    
-    async function refreshDemo() {
-      try {
-        const res = await fetch('/api/refresh-demo', { method: 'POST' });
-        const json = await res.json();
-        showNotification('Demo data refreshed!');
-        setTimeout(fetchData, 500);
-      } catch (err) {
-        showNotification('Error refreshing demo', 'error');
-      }
-    }
-    
-    // File upload handler - FIXED!
-    document.getElementById('fileInput').addEventListener('change', async function(e) {
-      const file = e.target.files[0];
-      if (!file) return;
-      
-      showNotification('Uploading file...', 'info');
-      
-      const reader = new FileReader();
-      reader.onload = async function(ev) {
-        try {
-          const jsonData = JSON.parse(ev.target.result);
-          
-          const res = await fetch('/api/upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(jsonData)
-          });
-          
-          const result = await res.json();
-          if (result.status === 'success') {
-            showNotification(`✓ Uploaded ${result.count} records!`);
-            setTimeout(fetchData, 500);
-          } else {
-            showNotification(result.message, 'error');
-          }
-        } catch (err) {
-          showNotification('Error: ' + err.message, 'error');
-        }
-      };
-      reader.readAsText(file);
-      
-      // Reset file input
-      e.target.value = '';
-    });
-    
-    // [Same aggregation and rendering functions as before - keeping compact]
-    function aggI(d) { const ds=[...new Set(d.map(r=>r._ds))];const ld=ds[ds.length-1];const td=d.filter(r=>r._ds===ld);const bs=grp(td,'symbol');return Object.entries(bs).map(([s,rs])=>{const hs=new Set(rs.map(r=>r._h));const h1=hs.size;const bk=new Set([...hs].map(h=>Math.floor((h-9)/4)));const h4=bk.size;const tot=h1+h4;return{sym:s,sec:rs[0].sector,mc:rs[0].marketcapname,h1,h4,tot,str:tot>=8?'strong':tot>=5?'moderate':'weak',price:rs[rs.length-1].price||100}}).sort((a,b)=>b.tot-a.tot) }
-    function aggS(d) { const ds=[...new Set(d.map(r=>r._ds))].slice(-3);const sd=d.filter(r=>ds.includes(r._ds));const bs=grp(sd,'symbol');return Object.entries(bs).map(([s,rs])=>{const bd=grp(rs,'_ds');const h1=(bd[ds[ds.length-1]]||[]).length;const h2=ds.slice(-2).reduce((m,dt)=>m+(bd[dt]||[]).length,0);const h3=ds.reduce((m,dt)=>m+(bd[dt]||[]).length,0);let c=0;for(let i=ds.length-1;i>=0;i--){if((bd[ds[i]]||[]).length>0)c++;else if(i===ds.length-1)break;else break}return{sym:s,sec:rs[0].sector,mc:rs[0].marketcapname,h1,h2,h3,c,tot:h3,str:c>=3?'strong':c>=2?'moderate':'weak',price:rs[rs.length-1].price||100}}).sort((a,b)=>b.h3-a.h3) }
-    function aggP(d) { const ds=[...new Set(d.map(r=>r._ds))].slice(-15);const pd=d.filter(r=>ds.includes(r._ds));const bs=grp(pd,'symbol');return Object.entries(bs).map(([s,rs])=>{const bd=grp(rs,'_ds');const h5=ds.slice(-5).reduce((m,dt)=>m+(bd[dt]||[]).length,0);const h7=ds.slice(-7).reduce((m,dt)=>m+(bd[dt]||[]).length,0);const h15=ds.reduce((m,dt)=>m+(bd[dt]||[]).length,0);const dit=ds.filter(dt=>(bd[dt]||[]).length>0).length;return{sym:s,sec:rs[0].sector,mc:rs[0].marketcapname,h5,h7,h15,dit,tot:h15,str:dit>=7?'strong':dit>=5?'moderate':'weak',price:rs[rs.length-1].price||100}}).sort((a,b)=>b.h15-a.h15) }
-    function lvl(st,m) { const mom=st.tot||0;const vol=m==='intraday'?0.03:m==='swing'?0.05:0.08;const bp=st.price||100;const mf=mom/(m==='intraday'?10:m==='swing'?8:15);const buy=bp*(1-vol*(1-mf*0.5));const sell=bp*(1+vol*(1+mf*0.8));const sl=buy*0.95;return{buy:buy.toFixed(2),sell:sell.toFixed(2),sl:sl.toFixed(2),rr:((sell-buy)/buy*100).toFixed(1)} }
-    function scr(st,m) { const b=st.tot||0;const s=st.str==='strong'?3:st.str==='moderate'?2:1;let sc=b*s;if(m==='swing')sc+=(st.c||0)*5;if(m==='positional')sc+=(st.dit||0)*3;return sc }
-    
-    function genPort() {
-      if(!data.length)return;const agg=mode==='intraday'?aggI(data):mode==='swing'?aggS(data):aggP(data);const top=agg.filter(s=>s.str==='strong'||s.str==='moderate').slice(0,15);top.forEach(s=>s.score=scr(s,mode));top.sort((a,b)=>b.score-a.score);const secs=grp(top,'sec'),sel=[];Object.keys(secs).forEach(sec=>sel.push(...secs[sec].slice(0,2)));if(sel.length<8)sel.push(...top.filter(s=>!sel.includes(s)).slice(0,8-sel.length));const selected=sel.slice(0,10);const ts=selected.reduce((sum,s)=>sum+s.score,0);selected.forEach(s=>{s.alloc=((s.score/ts)*100).toFixed(1);s.ret=(mode==='intraday'?15+Math.random()*10:mode==='swing'?25+Math.random()*15:35+Math.random()*20).toFixed(1)});const cagr=mode==='intraday'?32:mode==='swing'?36:38;document.getElementById('cagrBadge').textContent=`${cagr}% CAGR`;document.getElementById('portfolio').style.display='block';document.getElementById('portContent').innerHTML=selected.map((s,i)=>`<div class="port-card"><div style="display:flex;justify-content:space-between;margin-bottom:10px;"><div style="font-size:1.2rem;font-weight:700;color:var(--accent);">#${i+1} ${s.sym}</div><div style="font-size:1.2rem;font-weight:700;color:var(--success);">${s.alloc}%</div></div><div style="color:var(--muted);margin-bottom:10px;font-size:0.85rem;">${s.sec} • ${s.mc}</div><div style="display:flex;justify-content:space-between;"><div><span style="font-size:0.75rem;color:var(--muted);">Expected:</span> <span style="color:var(--success);font-weight:600;">${s.ret}%</span></div><div><span style="font-size:0.75rem;color:var(--muted);">Score:</span> <span style="color:var(--accent);font-weight:600;">${s.score.toFixed(0)}</span></div></div></div>`).join('');document.getElementById('portfolio').scrollIntoView({behavior:'smooth'});showNotification('Portfolio generated!')
-    }
-    
-    function render() {
-      if(!data.length)return;const agg=mode==='intraday'?aggI(data):mode==='swing'?aggS(data):aggP(data);const fl=agg.filter(r=>{if(filt.sec!=='all'&&r.sec!==filt.sec)return false;if(filt.mc!=='all'&&r.mc!==filt.mc)return false;if(r.tot<filt.min)return false;return true});const sec=[...new Set(agg.map(s=>s.sec))].sort(),mca=[...new Set(agg.map(s=>s.mc))].sort();
-      
-      document.getElementById('metrics').innerHTML=(mode==='intraday'?[{l:'Active',v:agg.length,s:'Intraday'},{l:'1h Hits',v:agg.reduce((s,r)=>s+r.h1,0),s:'Hourly'},{l:'4h Hits',v:agg.reduce((s,r)=>s+r.h4,0),s:'Blocks'},{l:'Strong',v:agg.filter(s=>s.str==='strong').length,s:'Setups'}]:mode==='swing'?[{l:'Swing',v:agg.length,s:'1-3 days'},{l:'3d Hits',v:agg.reduce((s,r)=>s+r.h3,0),s:'Signals'},{l:'2+ Days',v:agg.filter(s=>s.c>=2).length,s:'Momentum'},{l:'Strong',v:agg.filter(s=>s.str==='strong').length,s:'Setups'}]:[{l:'Position',v:agg.length,s:'Multi-week'},{l:'15d Hits',v:agg.reduce((s,r)=>s+r.h15,0),s:'Extended'},{l:'5+ Trend',v:agg.filter(s=>s.dit>=5).length,s:'Days'},{l:'Leaders',v:agg.filter(s=>s.str==='strong').length,s:'Strong'}]).map(m=>`<div class="metric"><div class="metric-label">${m.l}</div><div class="metric-value">${m.v}</div><div class="metric-sub">${m.s}</div></div>`).join('');
-      
-      document.getElementById('filters').innerHTML=`<div class="filter"><label>Sector</label><select id="sf"><option value="all">All</option>${sec.map(s=>`<option value="${s}">${s}</option>`).join('')}</select></div><div class="filter"><label>Market Cap</label><select id="mf"><option value="all">All</option>${mca.map(m=>`<option value="${m}">${m}</option>`).join('')}</select></div><div class="filter" style="grid-column: span 2;"><label>Min Hits</label><input id="hf" type="number" value="${filt.min}"></div>`;
-      
-      document.getElementById('sf').onchange=e=>{filt.sec=e.target.value;render()};document.getElementById('mf').onchange=e=>{filt.mc=e.target.value;render()};document.getElementById('hf').oninput=e=>{filt.min=parseInt(e.target.value)||0;render()};
-      
-      const hd=mode==='intraday'?['Sym','Sec','MC','1h','4h','Tot','₹','Buy','Sell','Stop','R:R','Str']:mode==='swing'?['Sym','Sec','MC','1d','2d','3d','Con','₹','Buy','Sell','Stop','R:R','Set']:['Sym','Sec','MC','5d','7d','15d','Tr','₹','Buy','Sell','Stop','R:R','Set'];
-      
-      document.getElementById('thead').innerHTML=`<tr>${hd.map(h=>`<th>${h}</th>`).join('')}</tr>`;document.getElementById('title').textContent=mode==='intraday'?'Intraday':mode==='swing'?'Swing':'Positional';
-      
-      document.getElementById('tbody').innerHTML=fl.length?fl.map(r=>{const u=`https://in.tradingview.com/chart/?symbol=${encodeURIComponent(r.sym)}`;const b=`<span class="badge ${r.str}">${r.str}</span>`;const l=lvl(r,mode);const p=r.price?'₹'+r.price.toFixed(0):'--';
-        
-        if(mode==='intraday'){return`<tr><td><a href="${u}" target="_blank" class="sym-link">${r.sym}</a></td><td>${r.sec}</td><td>${r.mc}</td><td>${r.h1}</td><td>${r.h4}</td><td><strong>${r.tot}</strong></td><td>${p}</td><td class="buy">₹${l.buy}</td><td class="sell">₹${l.sell}</td><td>₹${l.sl}</td><td>${l.rr}%</td><td>${b}</td></tr>`}else if(mode==='swing'){return`<tr><td><a href="${u}" target="_blank" class="sym-link">${r.sym}</a></td><td>${r.sec}</td><td>${r.mc}</td><td>${r.h1}</td><td>${r.h2}</td><td>${r.h3}</td><td><strong>${r.c}</strong></td><td>${p}</td><td class="buy">₹${l.buy}</td><td class="sell">₹${l.sell}</td><td>₹${l.sl}</td><td>${l.rr}%</td><td>${b}</td></tr>`}else{return`<tr><td><a href="${u}" target="_blank" class="sym-link">${r.sym}</a></td><td>${r.sec}</td><td>${r.mc}</td><td>${r.h5}</td><td>${r.h7}</td><td>${r.h15}</td><td><strong>${r.dit}</strong></td><td>${p}</td><td class="buy">₹${l.buy}</td><td class="sell">₹${l.sell}</td><td>₹${l.sl}</td><td>${l.rr}%</td><td>${b}</td></tr>`}
-      }).join(''):'<tr><td colspan="12" style="text-align:center;padding:30px;color:var(--muted);">No matches</td></tr>'
-    }
-    
-    function switchMode(m) {
-      mode=m;document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['intraday','swing','positional'][i]===m));render()
-    }
-    
-    window.addEventListener('DOMContentLoaded',fetchData);
-  </script>
-</body>
-</html>
-'''
+    try:
+        while True:
+            success = update_cycle(driver)
+            
+            if success:
+                log(f"😴 Sleeping for {REFRESH_INTERVAL // 60} minutes...")
+                log(f"   Next update at: {datetime.now().fromtimestamp(time.time() + REFRESH_INTERVAL).strftime('%H:%M:%S')}")
+            else:
+                log("😴 Sleeping for 5 minutes before retry...")
+                time.sleep(5 * 60)
+                continue
+            
+            time.sleep(REFRESH_INTERVAL)
+            
+    except KeyboardInterrupt:
+        log("\n🛑 Stopped by user")
+    finally:
+        if driver:
+            driver.quit()
+        log("👋 Goodbye!")
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    main()
