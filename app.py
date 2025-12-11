@@ -28,7 +28,7 @@ from selenium.common.exceptions import WebDriverException, NoSuchElementExceptio
 # ============================================
 
 # REPLACE THIS WITH YOUR RENDER URL!
-CLOUD_DASHBOARD_URL = "https://your-app-name.onrender.com"  # ⚠️ CHANGE THIS!
+CLOUD_DASHBOARD_URL = "https://momdash-11.onrender.com"  # ⚠️ CHANGE THIS!
 
 CHARTINK_SCREENER_URL = "https://chartink.com/screener/copy-3-step-screener-with-volume-125"
 REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
