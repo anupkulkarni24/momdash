@@ -1,358 +1,198 @@
-#!/usr/bin/env python3
-"""
-Auto Upload to Cloud Dashboard
-Run this on your computer - it will:
-1. Scrape Chartink (with your browser login session)
-2. Automatically upload to your cloud dashboard
-3. Keep dashboard updated every 15 minutes
-
-Replace YOUR_RENDER_URL with your actual Render URL
-"""
-
-import time
-import csv
+from flask import Flask, jsonify, render_template_string, request
+from flask_cors import CORS
 import json
 import os
-import shutil
-import requests
-from pathlib import Path
-from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, NoSuchElementException
+from datetime import datetime, timedelta
+import random
+import threading
+import time
 
-# ============================================
-# CONFIGURATION
-# ============================================
+app = Flask(__name__)
+CORS(app)
 
-# REPLACE THIS WITH YOUR RENDER URL!
-CLOUD_DASHBOARD_URL = "https://momdash-11.onrender.com"  # ⚠️ CHANGE THIS!
+# Global data storage
+cached_data = []
+last_update = None
+data_source = "Demo"
+scraping_status = "Ready"
+scraping_in_progress = False
 
-CHARTINK_SCREENER_URL = "https://chartink.com/screener/copy-3-step-screener-with-volume-125"
-REFRESH_INTERVAL = 15 * 60  # 15 minutes in seconds
-DOWNLOAD_DIR = Path(__file__).resolve().parent / "downloads"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
-CSV_NAME = "screener.csv"
-CHROMEDRIVER_PATH = shutil.which("chromedriver") or ""
-HEADLESS = False  # Keep False to see browser and login
-DOWNLOAD_TIMEOUT = 40
-
-# ============================================
-# HELPER FUNCTIONS
-# ============================================
-
-def log(msg: str):
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
-
-def make_chrome_options(download_dir: str) -> Options:
-    opts = Options()
-    if HEADLESS:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1400,900")
+def generate_demo_data():
+    """Generate realistic demo data"""
+    symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 
+               'ITC', 'KOTAKBANK', 'LT', 'AXISBANK', 'TATAMOTORS', 'WIPRO', 'MARUTI', 
+               'BAJFINANCE', 'TATASTEEL', 'ASIANPAINT', 'TITAN', 'NESTLEIND', 'ULTRACEMCO',
+               'HINDUNILVR', 'ADANIENT', 'BAJAJFINSV', 'SUNPHARMA', 'ONGC', 'NTPC', 
+               'POWERGRID', 'M&M', 'TECHM', 'HINDALCO', 'HCLTECH', 'DRREDDY', 'CIPLA',
+               'HEROMOTOCO', 'EICHERMOT', 'GRASIM', 'JSWSTEEL', 'INDUSINDBK', 'VEDL']
+    sectors = ['Banking', 'IT', 'Auto', 'Pharma', 'FMCG', 'Metals', 'Energy', 'Telecom', 'Infrastructure']
+    mcaps = ['Large Cap', 'Mid Cap', 'Small Cap']
     
-    prefs = {
-        "download.default_directory": download_dir,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-        "profile.default_content_settings.popups": 0,
-        "safebrowsing.enabled": True,
-    }
-    opts.add_experimental_option("prefs", prefs)
-    return opts
+    data = []
+    today = datetime.now()
+    
+    for day in range(15):
+        date_obj = today - timedelta(days=day)
+        for hour in range(9, 16):
+            num_symbols = random.randint(8, 15)
+            selected_symbols = random.sample(symbols, num_symbols)
+            for symbol in selected_symbols:
+                price = random.uniform(100, 3000)
+                data.append({
+                    "date": f"{date_obj.day:02d}-{date_obj.month:02d}-{date_obj.year} {hour:02d}:{random.randint(0, 59):02d} {'PM' if hour >= 12 else 'AM'}",
+                    "symbol": symbol,
+                    "sector": random.choice(sectors),
+                    "marketcapname": random.choice(mcaps),
+                    "close": f"{price:.2f}",
+                    "price": f"{price:.2f}"
+                })
+    return data
 
-def start_driver() -> webdriver.Chrome:
-    if CHROMEDRIVER_PATH:
-        service = ChromeService(executable_path=CHROMEDRIVER_PATH)
-    else:
-        service = ChromeService()
-    
-    options = make_chrome_options(str(DOWNLOAD_DIR.resolve()))
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
+# Initialize with demo data
+cached_data = generate_demo_data()
+last_update = datetime.now()
 
-def wait_for_login(driver: webdriver.Chrome, timeout: int = 300):
-    """
-    Wait for user to login manually
-    Checks if we're still on login page
-    """
-    log("⏳ Waiting for you to login to Chartink...")
-    log("   Please login in the browser window")
-    log("   Script will continue automatically after login")
-    
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            current_url = driver.current_url
-            # If we're no longer on login page, assume logged in
-            if "login" not in current_url.lower() and "chartink.com" in current_url:
-                log("✓ Login detected! Continuing...")
-                return True
-            time.sleep(2)
-        except:
-            pass
-    
-    log("⚠️ Timeout waiting for login")
-    return False
-
-def download_chartink_csv(driver: webdriver.Chrome = None) -> Path | None:
-    """
-    Download CSV from Chartink using browser session
-    """
-    should_quit = False
-    if driver is None:
-        driver = start_driver()
-        should_quit = True
-    
-    try:
-        log("📊 Loading Chartink screener...")
-        driver.get(CHARTINK_SCREENER_URL)
-        time.sleep(5)
-        
-        # Check if we need to login
-        if "login" in driver.current_url.lower():
-            log("🔐 Login required!")
-            if not wait_for_login(driver):
-                log("❌ Login failed or timed out")
-                return None
-            
-            # Go back to screener after login
-            driver.get(CHARTINK_SCREENER_URL)
-            time.sleep(5)
-        
-        log("📜 Scrolling to backtest section...")
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(5)
-        
-        # Track existing files
-        before = set(DOWNLOAD_DIR.glob("*.csv"))
-        
-        log("🔍 Looking for download button...")
-        try:
-            download_btn = driver.find_element(
-                By.XPATH,
-                "//*[contains(normalize-space(text()), 'Download csv')]"
-            )
-            download_btn.click()
-            log("✓ Clicked download button")
-        except NoSuchElementException:
-            log("⚠️ Could not find download button")
-            return None
-        
-        # Wait for download
-        log("⏳ Waiting for CSV download...")
-        waited = 0
-        while waited < DOWNLOAD_TIMEOUT:
-            after = set(DOWNLOAD_DIR.glob("*.csv"))
-            new_files = after - before
-            if new_files:
-                latest = sorted(new_files, key=lambda p: p.stat().st_mtime)[-1]
-                dest = DOWNLOAD_DIR / CSV_NAME
-                try:
-                    latest.replace(dest)
-                except:
-                    shutil.copy2(latest, dest)
-                log(f"✓ CSV downloaded: {dest}")
-                return dest
-            time.sleep(1)
-            waited += 1
-        
-        log("⏰ Download timeout")
-        return None
-        
-    except Exception as e:
-        log(f"❌ Error: {e}")
-        return None
-    finally:
-        if should_quit and driver:
-            driver.quit()
-
-def load_csv_to_json(csv_path: Path) -> list:
-    """
-    Convert CSV to JSON format
-    """
-    if not csv_path or not csv_path.exists():
-        return []
-    
-    log(f"📄 Reading CSV: {csv_path}")
-    try:
-        with csv_path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        
-        normalized = []
-        for r in rows:
-            item = {
-                "date": (
-                    r.get("date")
-                    or r.get("Date")
-                    or r.get("Date Time")
-                    or ""
-                ),
-                "symbol": (
-                    r.get("symbol")
-                    or r.get("Symbol")
-                    or r.get("SYMBOL")
-                    or ""
-                ),
-                "marketcapname": (
-                    r.get("marketcapname")
-                    or r.get("Marketcap")
-                    or r.get("Market Cap")
-                    or ""
-                ),
-                "sector": (
-                    r.get("sector")
-                    or r.get("Sector")
-                    or r.get("Industry")
-                    or ""
-                ),
-                "close": (
-                    r.get("close")
-                    or r.get("Close")
-                    or r.get("ltp")
-                    or r.get("LTP")
-                    or "0"
-                ),
-                "price": (
-                    r.get("close")
-                    or r.get("Close")
-                    or r.get("ltp")
-                    or r.get("LTP")
-                    or "0"
-                )
+@app.route('/')
+def index():
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Momentum Dashboard Pro</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, sans-serif; background: linear-gradient(135deg, #0a0e27 0%, #050814 100%); color: #e4e9f7; min-height: 100vh; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { text-align: center; font-size: 2rem; margin-bottom: 30px; background: linear-gradient(135deg, #00d4ff, #00ff88); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .card { background: #1a1f3a; border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid #2a2f4a; }
+        .btn { background: linear-gradient(135deg, #00d4ff, #0099cc); color: white; padding: 12px 24px; border: none; border-radius: 25px; cursor: pointer; font-weight: 600; margin: 5px; }
+        .btn:hover { transform: translateY(-2px); }
+        .info { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px; }
+        .info-box { background: #12172e; padding: 15px; border-radius: 8px; }
+        .info-label { font-size: 0.8rem; color: #8b92b0; text-transform: uppercase; }
+        .info-value { font-size: 1.5rem; color: #00d4ff; font-weight: 700; margin-top: 5px; }
+        .success { color: #00ff88; }
+        #fileInput { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚡ Momentum Dashboard Pro</h1>
+        <div class="card">
+            <h2 style="margin-bottom: 15px;">📊 Data Control</h2>
+            <button class="btn" onclick="document.getElementById('fileInput').click()">📤 Upload JSON</button>
+            <button class="btn" onclick="refreshData()">🔄 Refresh Data</button>
+            <input type="file" id="fileInput" accept=".json" onchange="uploadFile(event)">
+            <div class="info">
+                <div class="info-box">
+                    <div class="info-label">Last Updated</div>
+                    <div class="info-value" id="lastUpdate">Loading...</div>
+                </div>
+                <div class="info-box">
+                    <div class="info-label">Total Records</div>
+                    <div class="info-value" id="recordCount">0</div>
+                </div>
+                <div class="info-box">
+                    <div class="info-label">Data Source</div>
+                    <div class="info-value" id="dataSource">Demo</div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <p class="success">✅ Dashboard is live and ready!</p>
+            <p style="margin-top: 10px; color: #8b92b0;">Upload your JSON file to see your data visualized.</p>
+        </div>
+    </div>
+    <script>
+        async function loadData() {
+            try {
+                const res = await fetch('/api/data');
+                const json = await res.json();
+                document.getElementById('lastUpdate').textContent = new Date(json.last_update).toLocaleTimeString();
+                document.getElementById('recordCount').textContent = json.count;
+                document.getElementById('dataSource').textContent = json.data_source;
+            } catch (err) {
+                console.error(err);
             }
-            normalized.append(item)
+        }
         
-        log(f"✓ Loaded {len(normalized)} rows from CSV")
-        return normalized
-    except Exception as e:
-        log(f"❌ Error reading CSV: {e}")
-        return []
+        async function uploadFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    const res = await fetch('/api/upload', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                    const result = await res.json();
+                    alert(result.message || 'Upload successful!');
+                    loadData();
+                } catch (err) {
+                    alert('Error: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+        
+        async function refreshData() {
+            const res = await fetch('/api/refresh-demo', { method: 'POST' });
+            const json = await res.json();
+            alert(json.message);
+            loadData();
+        }
+        
+        window.onload = loadData;
+    </script>
+</body>
+</html>
+    """)
 
-def upload_to_cloud(data: list) -> bool:
-    """
-    Upload data to cloud dashboard
-    """
-    if not data:
-        log("⚠️ No data to upload")
-        return False
-    
+@app.route('/api/data')
+def get_data():
+    return jsonify({
+        "data": cached_data,
+        "last_update": last_update.isoformat() if last_update else None,
+        "status": scraping_status,
+        "count": len(cached_data),
+        "data_source": data_source
+    })
+
+@app.route('/api/refresh-demo', methods=['POST'])
+def refresh_demo():
+    global cached_data, last_update, data_source
+    cached_data = generate_demo_data()
+    last_update = datetime.now()
+    data_source = "Demo"
+    return jsonify({
+        "status": "success",
+        "message": "Demo data refreshed",
+        "count": len(cached_data)
+    })
+
+@app.route('/api/upload', methods=['POST'])
+def upload_data():
+    global cached_data, last_update, data_source
     try:
-        log(f"☁️ Uploading {len(data)} records to cloud...")
-        
-        response = requests.post(
-            f"{CLOUD_DASHBOARD_URL}/api/upload",
-            json=data,
-            headers={'Content-Type': 'application/json'},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            log(f"✅ Upload successful! {result.get('count', 0)} records on cloud")
-            return True
-        else:
-            log(f"❌ Upload failed: HTTP {response.status_code}")
-            log(f"   Response: {response.text[:200]}")
-            return False
-            
+        data = request.get_json()
+        if data and isinstance(data, list) and len(data) > 0:
+            cached_data = data
+            last_update = datetime.now()
+            data_source = "Uploaded"
+            return jsonify({
+                "status": "success",
+                "message": f"Uploaded {len(data)} records",
+                "count": len(cached_data)
+            })
+        return jsonify({"status": "error", "message": "Invalid data"}), 400
     except Exception as e:
-        log(f"❌ Upload error: {e}")
-        return False
-
-def update_cycle(driver: webdriver.Chrome = None) -> bool:
-    """
-    Complete update cycle: Download -> Convert -> Upload
-    """
-    log("=" * 60)
-    log("🔄 Starting update cycle")
-    log("=" * 60)
-    
-    # Download CSV
-    csv_path = download_chartink_csv(driver)
-    
-    if not csv_path:
-        log("⚠️ Using existing CSV if available...")
-        csv_path = DOWNLOAD_DIR / CSV_NAME
-        if not csv_path.exists():
-            log("❌ No CSV available")
-            return False
-    
-    # Convert to JSON
-    data = load_csv_to_json(csv_path)
-    
-    if not data:
-        log("❌ No data to upload")
-        return False
-    
-    # Upload to cloud
-    success = upload_to_cloud(data)
-    
-    if success:
-        log("=" * 60)
-        log("✅ Update cycle completed successfully!")
-        log("   Your cloud dashboard now has the latest data")
-        log("=" * 60)
-    else:
-        log("⚠️ Update cycle completed with errors")
-    
-    return success
-
-# ============================================
-# MAIN EXECUTION
-# ============================================
-
-def main():
-    print("""
-╔════════════════════════════════════════════════════════════════╗
-║           AUTO UPLOAD TO CLOUD DASHBOARD                       ║
-║                                                                ║
-║  This script will:                                            ║
-║  1. Open Chartink in browser                                  ║
-║  2. Wait for you to login (if needed)                         ║
-║  3. Download backtest CSV                                     ║
-║  4. Upload to your cloud dashboard                            ║
-║  5. Repeat every 15 minutes                                   ║
-║                                                                ║
-║  Your dashboard URL:                                          ║
-║  {url:<60} ║
-╚════════════════════════════════════════════════════════════════╝
-    """.format(url=CLOUD_DASHBOARD_URL))
-    
-    if "your-app-name" in CLOUD_DASHBOARD_URL:
-        print("⚠️  WARNING: You need to update CLOUD_DASHBOARD_URL!")
-        print("   Edit the script and replace with your actual Render URL")
-        print()
-        input("Press Enter to continue anyway (will fail) or Ctrl+C to exit...")
-    
-    # Start browser once (keeps login session)
-    log("🌐 Starting browser...")
-    driver = start_driver()
-    
-    try:
-        while True:
-            success = update_cycle(driver)
-            
-            if success:
-                log(f"😴 Sleeping for {REFRESH_INTERVAL // 60} minutes...")
-                log(f"   Next update at: {datetime.now().fromtimestamp(time.time() + REFRESH_INTERVAL).strftime('%H:%M:%S')}")
-            else:
-                log("😴 Sleeping for 5 minutes before retry...")
-                time.sleep(5 * 60)
-                continue
-            
-            time.sleep(REFRESH_INTERVAL)
-            
-    except KeyboardInterrupt:
-        log("\n🛑 Stopped by user")
-    finally:
-        if driver:
-            driver.quit()
-        log("👋 Goodbye!")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
