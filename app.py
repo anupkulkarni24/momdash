@@ -1,8 +1,13 @@
+#!/usr/bin/env python3
 """
-COMPLETE app.py for Render Deployment
-This is the FULL version with the complete dashboard UI
+Complete Momentum Dashboard for Render Deployment
+Save this as: app.py
 
-Save this as app.py and deploy to Render
+Features:
+- Upload JSON data
+- Display data with correct prices
+- Auto-refresh every 30 seconds
+- Mobile responsive
 """
 
 from flask import Flask, jsonify, render_template_string, request
@@ -11,27 +16,35 @@ import json
 import os
 from datetime import datetime, timedelta
 import random
-import threading
 
 app = Flask(__name__)
 CORS(app)
 
-# Global data storage
+# ============================================
+# GLOBAL STATE
+# ============================================
+
 cached_data = []
 last_update = None
 data_source = "Demo"
 scraping_status = "Ready"
 scraping_in_progress = False
 
+
+# ============================================
+# DEMO DATA GENERATOR
+# ============================================
+
 def generate_demo_data():
     """Generate realistic demo data"""
-    symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 
-               'ITC', 'KOTAKBANK', 'LT', 'AXISBANK', 'TATAMOTORS', 'WIPRO', 'MARUTI', 
-               'BAJFINANCE', 'TATASTEEL', 'ASIANPAINT', 'TITAN', 'NESTLEIND', 'ULTRACEMCO',
-               'HINDUNILVR', 'ADANIENT', 'BAJAJFINSV', 'SUNPHARMA', 'ONGC', 'NTPC', 
-               'POWERGRID', 'M&M', 'TECHM', 'HINDALCO', 'HCLTECH', 'DRREDDY', 'CIPLA',
-               'HEROMOTOCO', 'EICHERMOT', 'GRASIM', 'JSWSTEEL', 'INDUSINDBK', 'VEDL']
-    sectors = ['Banking', 'IT', 'Auto', 'Pharma', 'FMCG', 'Metals', 'Energy', 'Telecom', 'Infrastructure']
+    symbols = [
+        'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 
+        'BHARTIARTL', 'ITC', 'KOTAKBANK', 'LT', 'AXISBANK', 'TATAMOTORS', 
+        'WIPRO', 'MARUTI', 'BAJFINANCE', 'TATASTEEL', 'ASIANPAINT', 'TITAN', 
+        'NESTLEIND', 'ULTRACEMCO', 'HINDUNILVR', 'ADANIENT', 'BAJAJFINSV', 
+        'SUNPHARMA', 'ONGC', 'NTPC', 'POWERGRID', 'M&M', 'TECHM', 'HINDALCO'
+    ]
+    sectors = ['Banking', 'IT', 'Auto', 'Pharma', 'FMCG', 'Metals', 'Energy', 'Telecom']
     mcaps = ['Large Cap', 'Mid Cap', 'Small Cap']
     
     data = []
@@ -42,6 +55,7 @@ def generate_demo_data():
         for hour in range(9, 16):
             num_symbols = random.randint(8, 15)
             selected_symbols = random.sample(symbols, num_symbols)
+            
             for symbol in selected_symbols:
                 price = random.uniform(100, 3000)
                 data.append({
@@ -52,20 +66,31 @@ def generate_demo_data():
                     "close": f"{price:.2f}",
                     "price": f"{price:.2f}"
                 })
+    
     return data
 
-# Initialize with demo data
+
+# ============================================
+# INITIALIZE WITH DEMO DATA
+# ============================================
+
 cached_data = generate_demo_data()
 last_update = datetime.now()
 
-# API ENDPOINTS
+
+# ============================================
+# API ROUTES
+# ============================================
+
 @app.route('/')
 def index():
-    # Return full dashboard HTML (embedded in string)
-    return render_template_string(FULL_DASHBOARD_HTML)
+    """Main dashboard page"""
+    return render_template_string(DASHBOARD_HTML)
+
 
 @app.route('/api/data')
 def get_data():
+    """Get current data"""
     return jsonify({
         "data": cached_data,
         "last_update": last_update.isoformat() if last_update else None,
@@ -75,46 +100,59 @@ def get_data():
         "scraping_in_progress": scraping_in_progress
     })
 
+
 @app.route('/api/refresh-demo', methods=['POST'])
 def refresh_demo():
+    """Refresh with new demo data"""
     global cached_data, last_update, data_source, scraping_status
+    
     cached_data = generate_demo_data()
     last_update = datetime.now()
     data_source = "Demo"
     scraping_status = "Demo data refreshed"
+    
     return jsonify({
         "status": "success",
         "message": "Demo data refreshed",
         "count": len(cached_data)
     })
 
+
 @app.route('/api/upload', methods=['POST'])
 def upload_data():
+    """Upload custom JSON data"""
     global cached_data, last_update, data_source, scraping_status
+    
     try:
         data = request.get_json()
-        if data and isinstance(data, list) and len(data) > 0:
-            cached_data = data
-            last_update = datetime.now()
-            data_source = "Uploaded (Real Data)"
-            scraping_status = f"Uploaded {len(data)} records successfully"
+        
+        if not data or not isinstance(data, list) or len(data) == 0:
             return jsonify({
-                "status": "success",
-                "message": f"Uploaded {len(data)} records",
-                "count": len(cached_data)
-            })
+                "status": "error", 
+                "message": "Invalid data format. Expected non-empty JSON array"
+            }), 400
+        
+        cached_data = data
+        last_update = datetime.now()
+        data_source = "Uploaded (Real Data)"
+        scraping_status = f"Uploaded {len(data)} records successfully"
+        
         return jsonify({
-            "status": "error", 
-            "message": "Invalid data format. Expected non-empty JSON array"
-        }), 400
+            "status": "success",
+            "message": f"Uploaded {len(data)} records",
+            "count": len(cached_data)
+        })
+        
     except Exception as e:
         return jsonify({
             "status": "error", 
             "message": str(e)
         }), 500
 
+
 @app.route('/api/health')
 def health():
+    """Health check endpoint"""
     return jsonify({
         "status": "healthy",
         "records": len(cached_data),
@@ -122,8 +160,12 @@ def health():
         "data_source": data_source
     })
 
-# Full Dashboard HTML (keeping it simple but functional)
-FULL_DASHBOARD_HTML = """
+
+# ============================================
+# DASHBOARD HTML
+# ============================================
+
+DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -131,34 +173,197 @@ FULL_DASHBOARD_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Momentum Dashboard Pro</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0a0e27; --card: #1a1f3a; --accent: #00d4ff; --success: #00ff88;
-            --text: #e4e9f7; --muted: #8b92b0; --border: #2a2f4a;
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
         }
-        body { font-family: -apple-system, sans-serif; background: linear-gradient(135deg, var(--bg) 0%, #050814 100%); color: var(--text); min-height: 100vh; padding: 20px; }
-        .container { max-width: 1400px; margin: 0 auto; }
-        h1 { text-align: center; font-size: 2.5rem; margin-bottom: 10px; background: linear-gradient(135deg, var(--accent), var(--success)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .subtitle { text-align: center; color: var(--muted); margin-bottom: 30px; }
-        .card { background: var(--card); border-radius: 12px; padding: 25px; margin-bottom: 20px; border: 1px solid var(--border); }
-        .btn { background: linear-gradient(135deg, var(--accent), #0099cc); color: white; padding: 12px 24px; border: none; border-radius: 25px; cursor: pointer; font-weight: 600; margin: 5px; transition: all 0.3s; }
-        .btn:hover { transform: translateY(-2px); }
-        .btn-upload { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
-        .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px; }
-        .info-box { background: #12172e; padding: 15px; border-radius: 8px; border: 1px solid var(--border); }
-        .info-label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; margin-bottom: 5px; }
-        .info-value { font-size: 1.5rem; color: var(--accent); font-weight: 700; }
-        .success-msg { color: var(--success); padding: 15px; background: rgba(0, 255, 136, 0.1); border-radius: 8px; margin-top: 15px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
-        th { background: #12172e; color: var(--accent); font-size: 0.85rem; text-transform: uppercase; }
-        tr:hover { background: #12172e; }
-        #fileInput { display: none; }
-        .notification { position: fixed; top: 20px; right: 20px; background: var(--card); padding: 15px 20px; border-radius: 10px; border: 2px solid var(--success); box-shadow: 0 4px 20px rgba(0,0,0,0.5); z-index: 1000; animation: slideIn 0.3s; }
-        @keyframes slideIn { from { transform: translateX(400px); } to { transform: translateX(0); } }
+        
+        :root {
+            --bg: #0a0e27;
+            --card: #1a1f3a;
+            --accent: #00d4ff;
+            --success: #00ff88;
+            --text: #e4e9f7;
+            --muted: #8b92b0;
+            --border: #2a2f4a;
+        }
+        
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, var(--bg) 0%, #050814 100%);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container { 
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        h1 { 
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, var(--accent), var(--success));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle { 
+            text-align: center;
+            color: var(--muted);
+            margin-bottom: 30px;
+            font-size: 1rem;
+        }
+        
+        .card { 
+            background: var(--card);
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        
+        .card h2 {
+            margin-bottom: 20px;
+            color: var(--accent);
+            font-size: 1.3rem;
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        
+        .btn { 
+            background: linear-gradient(135deg, var(--accent), #0099cc);
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.3s;
+        }
+        
+        .btn:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0, 212, 255, 0.4);
+        }
+        
+        .btn-upload { 
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        }
+        
+        .info-grid { 
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .info-box { 
+            background: #12172e;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        
+        .info-label { 
+            font-size: 0.8rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            margin-bottom: 5px;
+            letter-spacing: 1px;
+        }
+        
+        .info-value { 
+            font-size: 1.5rem;
+            color: var(--accent);
+            font-weight: 700;
+        }
+        
+        .success-msg { 
+            color: var(--success);
+            padding: 15px;
+            background: rgba(0, 255, 136, 0.1);
+            border-radius: 8px;
+            margin-top: 15px;
+            border: 1px solid rgba(0, 255, 136, 0.3);
+        }
+        
+        table { 
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        th, td { 
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        th { 
+            background: #12172e;
+            color: var(--accent);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            position: sticky;
+            top: 0;
+        }
+        
+        tr:hover { 
+            background: #12172e;
+        }
+        
+        #fileInput { 
+            display: none;
+        }
+        
+        .notification { 
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            border: 2px solid var(--success);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            animation: slideIn 0.3s;
+            max-width: 300px;
+        }
+        
+        @keyframes slideIn { 
+            from { transform: translateX(400px); opacity: 0; } 
+            to { transform: translateX(0); opacity: 1; } 
+        }
+        
+        .table-wrapper {
+            overflow-x: auto;
+            border-radius: 8px;
+        }
+        
         @media (max-width: 768px) {
-            h1 { font-size: 1.8rem; }
-            .info-grid { grid-template-columns: 1fr; }
+            h1 { 
+                font-size: 1.8rem;
+            }
+            
+            .info-grid { 
+                grid-template-columns: 1fr;
+            }
+            
+            .card {
+                padding: 15px;
+            }
         }
     </style>
 </head>
@@ -168,12 +373,17 @@ FULL_DASHBOARD_HTML = """
         <p class="subtitle">Cloud-Deployed | Real-Time Data Updates</p>
         
         <div class="card">
-            <h2 style="margin-bottom: 20px; color: var(--accent);">📊 Data Control Panel</h2>
+            <h2>📊 Data Control Panel</h2>
             
-            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                <button class="btn btn-upload" onclick="document.getElementById('fileInput').click()">📤 Upload JSON</button>
-                <button class="btn" onclick="refreshDemo()">🔄 Refresh Demo</button>
+            <div class="btn-group">
+                <button class="btn btn-upload" onclick="document.getElementById('fileInput').click()">
+                    📤 Upload JSON
+                </button>
+                <button class="btn" onclick="refreshDemo()">
+                    🔄 Refresh Demo
+                </button>
             </div>
+            
             <input type="file" id="fileInput" accept=".json" onchange="uploadFile(event)">
             
             <div class="info-grid">
@@ -197,20 +407,24 @@ FULL_DASHBOARD_HTML = """
         </div>
         
         <div class="card">
-            <h2 style="margin-bottom: 15px; color: var(--accent);">📋 Data Preview</h2>
-            <div style="overflow-x: auto;">
+            <h2>📋 Data Preview (First 15 Unique Stocks)</h2>
+            <div class="table-wrapper">
                 <table id="dataTable">
                     <thead>
                         <tr>
                             <th>Symbol</th>
                             <th>Sector</th>
                             <th>Market Cap</th>
-                            <th>Price</th>
+                            <th>Price (₹)</th>
                             <th>Date</th>
                         </tr>
                     </thead>
                     <tbody id="tableBody">
-                        <tr><td colspan="5" style="text-align: center; padding: 40px; color: var(--muted);">Loading data...</td></tr>
+                        <tr>
+                            <td colspan="5" style="text-align: center; padding: 40px; color: var(--muted);">
+                                Loading data...
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
@@ -232,16 +446,19 @@ FULL_DASHBOARD_HTML = """
                 const res = await fetch('/api/data');
                 const json = await res.json();
                 
+                // Update info boxes
                 const lastUpdateDate = new Date(json.last_update);
                 document.getElementById('lastUpdate').textContent = lastUpdateDate.toLocaleTimeString();
                 document.getElementById('recordCount').textContent = json.count;
                 document.getElementById('dataSource').textContent = json.data_source || 'Demo';
                 
-                // Display first 10 records in table
+                // Display data in table - group by symbol to show unique stocks
                 const tbody = document.getElementById('tableBody');
+                
                 if (json.data && json.data.length > 0) {
-                    // Group by symbol to show unique symbols with their prices
+                    // Group by symbol to show each stock once with its latest price
                     const symbolMap = new Map();
+                    
                     json.data.forEach(row => {
                         const symbol = row.symbol || 'N/A';
                         if (!symbolMap.has(symbol)) {
@@ -249,16 +466,55 @@ FULL_DASHBOARD_HTML = """
                         }
                     });
                     
+                    // Get unique stocks and show first 15
                     const uniqueData = Array.from(symbolMap.values()).slice(0, 15);
                     
                     const rows = uniqueData.map(row => {
-                        // Parse price - try multiple fields
+                        // Parse price - try multiple fields and clean the value
                         let price = row.price || row.close || row.ltp || row.LTP || '0';
+                        
                         if (typeof price === 'string') {
-                            price = price.replace(',', '').replace('₹', '').replace('
+                            price = price.replace(/,/g, '').replace(/₹/g, '').replace(/\$/g, '').trim();
+                        }
+                        
+                        const priceNum = parseFloat(price) || 0;
+                        
+                        return `
+                            <tr>
+                                <td><strong>${row.symbol || 'N/A'}</strong></td>
+                                <td>${row.sector || 'N/A'}</td>
+                                <td>${row.marketcapname || 'N/A'}</td>
+                                <td><strong style="color: var(--accent);">₹${priceNum.toFixed(2)}</strong></td>
+                                <td style="font-size: 0.85rem; color: var(--muted);">${row.date || 'N/A'}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                    
+                    tbody.innerHTML = rows;
+                    
+                    // Console logging for debugging
+                    console.log('✅ Data loaded:', json.count, 'records,', uniqueData.length, 'unique symbols');
+                    console.log('📊 Sample prices:', uniqueData.slice(0, 3).map(r => `${r.symbol}: ₹${r.price}`));
+                    
+                } else {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="5" style="text-align: center; padding: 40px; color: var(--muted);">
+                                No data available
+                            </td>
+                        </tr>
+                    `;
+                }
+                
             } catch (err) {
-                console.error('Load error:', err);
-                document.getElementById('tableBody').innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 40px; color: #ff4466;">Error loading data</td></tr>';
+                console.error('❌ Load error:', err);
+                document.getElementById('tableBody').innerHTML = `
+                    <tr>
+                        <td colspan="5" style="text-align: center; padding: 40px; color: #ff4466;">
+                            Error loading data: ${err.message}
+                        </td>
+                    </tr>
+                `;
             }
         }
         
@@ -266,14 +522,14 @@ FULL_DASHBOARD_HTML = """
             const file = event.target.files[0];
             if (!file) return;
             
-            showNotification('Uploading file...');
+            showNotification('📤 Uploading file...');
             
             const reader = new FileReader();
             reader.onload = async (e) => {
                 try {
                     const data = JSON.parse(e.target.result);
                     
-                    console.log('Uploading', data.length, 'records...');
+                    console.log('📤 Uploading', data.length, 'records...');
                     
                     const res = await fetch('/api/upload', {
                         method: 'POST',
@@ -285,29 +541,38 @@ FULL_DASHBOARD_HTML = """
                     
                     if (result.status === 'success') {
                         showNotification('✅ Upload successful! ' + result.count + ' records');
+                        
                         document.getElementById('successMsg').style.display = 'block';
                         document.getElementById('successText').textContent = result.message;
+                        
                         setTimeout(() => loadData(), 500);
                     } else {
                         showNotification('❌ ' + result.message, true);
                     }
+                    
                 } catch (err) {
                     showNotification('❌ Error: ' + err.message, true);
-                    console.error('Upload error:', err);
+                    console.error('❌ Upload error:', err);
                 }
             };
+            
             reader.readAsText(file);
             event.target.value = '';
         }
         
         async function refreshDemo() {
             try {
+                showNotification('🔄 Refreshing demo data...');
+                
                 const res = await fetch('/api/refresh-demo', { method: 'POST' });
                 const json = await res.json();
-                showNotification(json.message);
+                
+                showNotification('✅ ' + json.message);
                 setTimeout(() => loadData(), 500);
+                
             } catch (err) {
-                showNotification('Error refreshing demo', true);
+                showNotification('❌ Error refreshing demo', true);
+                console.error('❌ Refresh error:', err);
             }
         }
         
@@ -321,96 +586,10 @@ FULL_DASHBOARD_HTML = """
 </html>
 """
 
-if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-, '').trim();
-                        }
-                        const priceNum = parseFloat(price) || 0;
-                        
-                        return `
-                            <tr>
-                                <td><strong>${row.symbol || 'N/A'}</strong></td>
-                                <td>${row.sector || 'N/A'}</td>
-                                <td>${row.marketcapname || 'N/A'}</td>
-                                <td><strong style="color: var(--accent);">₹${priceNum.toFixed(2)}</strong></td>
-                                <td style="font-size: 0.85rem; color: var(--muted);">${row.date || 'N/A'}</td>
-                            </tr>
-                        `;
-                    }).join('');
-                    tbody.innerHTML = rows;
-                    
-                    console.log('Data loaded:', json.count, 'records,', uniqueData.length, 'unique symbols');
-                    console.log('Sample prices:', uniqueData.slice(0, 3).map(r => `${r.symbol}: ₹${r.price}`));
-                } else {
-                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 40px; color: var(--muted);">No data available</td></tr>';
-                }
-                
-                console.log('Data loaded:', json.count, 'records');
-            } catch (err) {
-                console.error('Load error:', err);
-                document.getElementById('tableBody').innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 40px; color: #ff4466;">Error loading data</td></tr>';
-            }
-        }
-        
-        async function uploadFile(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            
-            showNotification('Uploading file...');
-            
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const data = JSON.parse(e.target.result);
-                    
-                    console.log('Uploading', data.length, 'records...');
-                    
-                    const res = await fetch('/api/upload', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(data)
-                    });
-                    
-                    const result = await res.json();
-                    
-                    if (result.status === 'success') {
-                        showNotification('✅ Upload successful! ' + result.count + ' records');
-                        document.getElementById('successMsg').style.display = 'block';
-                        document.getElementById('successText').textContent = result.message;
-                        setTimeout(() => loadData(), 500);
-                    } else {
-                        showNotification('❌ ' + result.message, true);
-                    }
-                } catch (err) {
-                    showNotification('❌ Error: ' + err.message, true);
-                    console.error('Upload error:', err);
-                }
-            };
-            reader.readAsText(file);
-            event.target.value = '';
-        }
-        
-        async function refreshDemo() {
-            try {
-                const res = await fetch('/api/refresh-demo', { method: 'POST' });
-                const json = await res.json();
-                showNotification(json.message);
-                setTimeout(() => loadData(), 500);
-            } catch (err) {
-                showNotification('Error refreshing demo', true);
-            }
-        }
-        
-        // Load data on page load and refresh every 30 seconds
-        window.addEventListener('DOMContentLoaded', () => {
-            loadData();
-            setInterval(loadData, 30000);
-        });
-    </script>
-</body>
-</html>
-"""
+
+# ============================================
+# RUN SERVER
+# ============================================
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
