@@ -1,693 +1,886 @@
-"""
-ENHANCED app.py for Render Deployment
-Complete dashboard with Intraday/Swing/Positional + Portfolio Tracking
-
-Save this as app.py and deploy to Render
-"""
-
-from flask import Flask, jsonify, render_template_string, request
-from flask_cors import CORS
-import json
-import os
-from datetime import datetime, timedelta
-import random
-
-app = Flask(__name__)
-CORS(app)
-
-# Global data storage
-cached_data = []
-portfolio_data = []
-last_update = None
-data_source = "Demo"
-scraping_status = "Ready"
-
-def categorize_strategy(row):
-    """Categorize stock into Intraday/Swing/Positional based on price action"""
-    try:
-        price = float(str(row.get('price', 0)).replace(',', '').replace('₹', ''))
-        
-        # Simple strategy logic (customize as needed)
-        volatility = random.random()  # In real case, calculate from historical data
-        
-        if volatility > 0.7:
-            return "Intraday"
-        elif volatility > 0.4:
-            return "Swing"
-        else:
-            return "Positional"
-    except:
-        return "Swing"  # Default
-
-def generate_demo_data():
-    """Generate realistic demo data with strategies"""
-    symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 
-               'ITC', 'KOTAKBANK', 'LT', 'AXISBANK', 'TATAMOTORS', 'WIPRO', 'MARUTI', 
-               'BAJFINANCE', 'TATASTEEL', 'ASIANPAINT', 'TITAN', 'NESTLEIND', 'ULTRACEMCO']
-    sectors = ['Banking', 'IT', 'Auto', 'Pharma', 'FMCG', 'Metals', 'Energy']
-    mcaps = ['Large Cap', 'Mid Cap', 'Small Cap']
-    strategies = ['Intraday', 'Swing', 'Positional']
-    
-    data = []
-    today = datetime.now()
-    
-    for day in range(10):
-        date_obj = today - timedelta(days=day)
-        for hour in range(9, 16):
-            num_symbols = random.randint(5, 10)
-            selected_symbols = random.sample(symbols, num_symbols)
-            for symbol in selected_symbols:
-                price = random.uniform(100, 3000)
-                data.append({
-                    "date": f"{date_obj.day:02d}-{date_obj.month:02d}-{date_obj.year} {hour:02d}:{random.randint(0, 59):02d}",
-                    "symbol": symbol,
-                    "sector": random.choice(sectors),
-                    "marketcapname": random.choice(mcaps),
-                    "close": f"{price:.2f}",
-                    "price": f"{price:.2f}",
-                    "strategy": random.choice(strategies),
-                    "volume": random.randint(100000, 10000000),
-                    "change_pct": round(random.uniform(-5, 5), 2)
-                })
-    return data
-
-# Initialize with demo data
-cached_data = generate_demo_data()
-last_update = datetime.now()
-
-# API ENDPOINTS
-@app.route('/')
-def index():
-    return render_template_string(DASHBOARD_HTML)
-
-@app.route('/api/data')
-def get_data():
-    # Add strategy categorization to data
-    enriched_data = []
-    for row in cached_data:
-        if 'strategy' not in row:
-            row['strategy'] = categorize_strategy(row)
-        enriched_data.append(row)
-    
-    return jsonify({
-        "data": enriched_data,
-        "portfolio": portfolio_data,
-        "last_update": last_update.isoformat() if last_update else None,
-        "status": scraping_status,
-        "count": len(enriched_data),
-        "data_source": data_source
-    })
-
-@app.route('/api/portfolio', methods=['GET', 'POST', 'DELETE'])
-def manage_portfolio():
-    global portfolio_data
-    
-    if request.method == 'GET':
-        return jsonify({"portfolio": portfolio_data})
-    
-    elif request.method == 'POST':
-        trade = request.get_json()
-        trade['id'] = len(portfolio_data) + 1
-        trade['timestamp'] = datetime.now().isoformat()
-        portfolio_data.append(trade)
-        return jsonify({"status": "success", "trade": trade})
-    
-    elif request.method == 'DELETE':
-        trade_id = request.args.get('id', type=int)
-        portfolio_data = [t for t in portfolio_data if t.get('id') != trade_id]
-        return jsonify({"status": "success"})
-
-@app.route('/api/refresh-demo', methods=['POST'])
-def refresh_demo():
-    global cached_data, last_update, data_source, scraping_status
-    cached_data = generate_demo_data()
-    last_update = datetime.now()
-    data_source = "Demo"
-    scraping_status = "Demo data refreshed"
-    return jsonify({
-        "status": "success",
-        "message": "Demo data refreshed",
-        "count": len(cached_data)
-    })
-
-@app.route('/api/upload', methods=['POST'])
-def upload_data():
-    global cached_data, last_update, data_source, scraping_status
-    try:
-        data = request.get_json()
-        if data and isinstance(data, list) and len(data) > 0:
-            # Add strategy categorization during upload
-            for row in data:
-                if 'strategy' not in row:
-                    row['strategy'] = categorize_strategy(row)
-            
-            cached_data = data
-            last_update = datetime.now()
-            data_source = "Uploaded (Real Data)"
-            scraping_status = f"Uploaded {len(data)} records successfully"
-            return jsonify({
-                "status": "success",
-                "message": f"Uploaded {len(data)} records",
-                "count": len(cached_data)
-            })
-        return jsonify({
-            "status": "error", 
-            "message": "Invalid data format"
-        }), 400
-    except Exception as e:
-        return jsonify({
-            "status": "error", 
-            "message": str(e)
-        }), 500
-
-@app.route('/api/health')
-def health():
-    return jsonify({
-        "status": "healthy",
-        "records": len(cached_data),
-        "portfolio_trades": len(portfolio_data),
-        "last_update": last_update.isoformat() if last_update else None,
-        "data_source": data_source
-    })
-
-DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Momentum Dashboard Pro - Portfolio Edition</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0a0e27; --card: #1a1f3a; --accent: #00d4ff; --success: #00ff88;
-            --warning: #ffa500; --danger: #ff4466; --text: #e4e9f7; --muted: #8b92b0; --border: #2a2f4a;
-        }
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
-            background: linear-gradient(135deg, var(--bg) 0%, #050814 100%); 
-            color: var(--text); min-height: 100vh; padding: 20px; 
-        }
-        .container { max-width: 1600px; margin: 0 auto; }
-        h1 { 
-            text-align: center; font-size: 2.5rem; margin-bottom: 10px; 
-            background: linear-gradient(135deg, var(--accent), var(--success)); 
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent; 
-        }
-        .subtitle { text-align: center; color: var(--muted); margin-bottom: 30px; }
-        .card { 
-            background: var(--card); border-radius: 12px; padding: 25px; 
-            margin-bottom: 20px; border: 1px solid var(--border); 
-        }
-        .btn { 
-            background: linear-gradient(135deg, var(--accent), #0099cc); 
-            color: white; padding: 12px 24px; border: none; border-radius: 25px; 
-            cursor: pointer; font-weight: 600; margin: 5px; transition: all 0.3s; 
-        }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0, 212, 255, 0.3); }
-        .btn-upload { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
-        .btn-success { background: linear-gradient(135deg, #00ff88, #00cc70); }
-        .btn-danger { background: linear-gradient(135deg, #ff4466, #cc3355); }
-        .info-grid { 
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); 
-            gap: 15px; margin-top: 20px; 
-        }
-        .info-box { 
-            background: #12172e; padding: 15px; border-radius: 8px; 
-            border: 1px solid var(--border); text-align: center;
-        }
-        .info-label { 
-            font-size: 0.75rem; color: var(--muted); 
-            text-transform: uppercase; margin-bottom: 5px; 
-        }
-        .info-value { font-size: 1.8rem; color: var(--accent); font-weight: 700; }
-        .tabs { 
-            display: flex; gap: 10px; margin-bottom: 20px; 
-            border-bottom: 2px solid var(--border); padding-bottom: 10px;
-        }
-        .tab { 
-            padding: 10px 20px; border-radius: 8px 8px 0 0; 
-            cursor: pointer; transition: all 0.3s; background: #12172e;
-        }
-        .tab.active { 
-            background: linear-gradient(135deg, var(--accent), #0099cc); 
-            color: white; font-weight: 600;
-        }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
-        th { 
-            background: #12172e; color: var(--accent); 
-            font-size: 0.85rem; text-transform: uppercase; 
-        }
-        tr:hover { background: #12172e; }
-        .badge { 
-            padding: 4px 12px; border-radius: 12px; font-size: 0.8rem; 
-            font-weight: 600; display: inline-block;
-        }
-        .badge-intraday { background: #ff4466; color: white; }
-        .badge-swing { background: #ffa500; color: white; }
-        .badge-positional { background: #00ff88; color: #0a0e27; }
-        .modal { 
-            display: none; position: fixed; top: 0; left: 0; 
-            width: 100%; height: 100%; background: rgba(0,0,0,0.8); 
-            z-index: 1000; align-items: center; justify-content: center;
-        }
-        .modal.active { display: flex; }
-        .modal-content { 
-            background: var(--card); padding: 30px; border-radius: 15px; 
-            max-width: 500px; width: 90%; border: 2px solid var(--accent);
-        }
-        .form-group { margin-bottom: 20px; }
-        .form-group label { 
-            display: block; margin-bottom: 8px; 
-            color: var(--muted); font-weight: 600; 
-        }
-        .form-group input, .form-group select { 
-            width: 100%; padding: 12px; border-radius: 8px; 
-            border: 1px solid var(--border); background: #12172e; 
-            color: var(--text); font-size: 1rem;
-        }
-        .notification { 
-            position: fixed; top: 20px; right: 20px; 
-            background: var(--card); padding: 15px 20px; border-radius: 10px; 
-            border: 2px solid var(--success); box-shadow: 0 4px 20px rgba(0,0,0,0.5); 
-            z-index: 1000; animation: slideIn 0.3s; 
-        }
-        @keyframes slideIn { from { transform: translateX(400px); } to { transform: translateX(0); } }
-        #fileInput { display: none; }
-        @media (max-width: 768px) {
-            h1 { font-size: 1.8rem; }
-            .info-grid { grid-template-columns: 1fr 1fr; }
-            .tabs { flex-wrap: wrap; }
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <title>Momentum Dashboard – Enhanced Trading Signals</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0b1020;
+      --bg-card: #111729;
+      --bg-alt: #151b30;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56,189,248,0.12);
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --danger: #f97373;
+      --success: #22c55e;
+      --warning: #facc15;
+      --border: #1f2937;
+      --radius-lg: 14px;
+      --radius-sm: 8px;
+      --shadow-soft: 0 18px 40px rgba(0,0,0,0.45);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, #111827 0, #020617 55%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .page {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 20px 16px 40px;
+    }
+
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .title-block h1 {
+      margin: 0;
+      font-size: 1.8rem;
+      letter-spacing: 0.03em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tag-pill {
+      font-size: 0.7rem;
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--accent-soft);
+      color: var(--accent);
+      background: rgba(15,23,42,0.8);
+    }
+
+    .subtitle {
+      margin: 4px 0 0;
+      font-size: 0.86rem;
+      color: var(--muted);
+      max-width: 640px;
+    }
+
+    /* Market Cap Quick Filter Buttons */
+    .mcap-filters {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .mcap-btn {
+      padding: 8px 16px;
+      border-radius: 20px;
+      border: 2px solid var(--border);
+      background: rgba(15,23,42,0.9);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+      transition: all 0.3s;
+    }
+
+    .mcap-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      transform: translateY(-2px);
+    }
+
+    .mcap-btn.active {
+      background: linear-gradient(135deg, var(--accent), #6366f1);
+      border-color: var(--accent);
+      color: white;
+      box-shadow: 0 4px 15px rgba(56,189,248,0.4);
+    }
+
+    /* Tabs */
+    .tabs {
+      display: inline-flex;
+      margin-top: 14px;
+      border-radius: 999px;
+      padding: 3px;
+      background: rgba(15,23,42,0.9);
+      border: 1px solid rgba(30,64,175,0.7);
+    }
+
+    .tab-btn {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 16px;
+      border-radius: 999px;
+      font-size: 0.83rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.18s ease;
+      white-space: nowrap;
+    }
+
+    .tab-btn span.icon {
+      font-size: 0.9rem;
+    }
+
+    .tab-btn.active {
+      background: linear-gradient(135deg, #38bdf8, #6366f1);
+      color: white;
+      box-shadow: 0 0 0 1px rgba(15,23,42,0.7);
+    }
+
+    .tab-btn:not(.active):hover {
+      background: rgba(30,64,175,0.55);
+      color: #e5e7eb;
+    }
+
+    /* Layout */
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0,2.5fr) minmax(0,1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    @media (max-width: 1100px) {
+      .grid {
+        grid-template-columns: minmax(0,1fr);
+      }
+    }
+
+    .card {
+      background: linear-gradient(145deg, var(--bg-card), #020617);
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      padding: 14px 14px 12px;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .card-title {
+      font-size: 0.96rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .card-title .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 10px rgba(56,189,248,0.9);
+    }
+
+    .card-subtitle {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    /* Summary badges */
+    .summary-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .summary-pill {
+      border-radius: var(--radius-sm);
+      background: radial-gradient(circle at top left, rgba(56,189,248,0.2), rgba(15,23,42,0.95));
+      border: 1px solid rgba(148,163,184,0.6);
+      padding: 6px 8px;
+    }
+
+    .summary-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      color: #cbd5f5;
+      margin-bottom: 4px;
+    }
+
+    .summary-value {
+      font-size: 0.98rem;
+      font-weight: 600;
+    }
+
+    .summary-hint {
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    /* Filters */
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .filter {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 150px;
+      flex: 1 1 150px;
+    }
+
+    .filter label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .filter select,
+    .filter input[type="number"],
+    .filter input[type="text"] {
+      background: rgba(15,23,42,0.9);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.78rem;
+    }
+
+    /* Table */
+    .table-wrapper {
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      overflow-y: auto;
+      overflow-x: auto;
+      max-height: 600px;
+      max-width: 100%;
+    }
+
+    table {
+      width: 100%;
+      min-width: 900px;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    thead {
+      background: linear-gradient(to right, rgba(15,23,42,0.95), rgba(30,64,175,0.7));
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    th, td {
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 1px solid rgba(31,41,55,0.9);
+      white-space: nowrap;
+    }
+
+    th {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #cbd5f5;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    th:hover {
+      background: rgba(30,64,175,0.4);
+    }
+
+    th .sort-indicator {
+      font-size: 0.7rem;
+      margin-left: 4px;
+      opacity: 0.8;
+    }
+
+    tbody tr:nth-child(even) {
+      background: rgba(15,23,42,0.75);
+    }
+
+    tbody tr:hover {
+      background: rgba(30,64,175,0.55);
+    }
+
+    .symbol-link {
+      color: #e5e7eb;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+
+    .symbol-link:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+
+    .pill-green {
+      background: rgba(16,185,129,0.16);
+      color: #6ee7b7;
+      border: 1px solid rgba(16,185,129,0.6);
+    }
+    .pill-yellow {
+      background: rgba(234,179,8,0.18);
+      color: #facc15;
+      border: 1px solid rgba(234,179,8,0.6);
+    }
+    .pill-blue {
+      background: rgba(59,130,246,0.2);
+      color: #bfdbfe;
+      border: 1px solid rgba(59,130,246,0.7);
+    }
+    .pill-red {
+      background: rgba(248,113,113,0.18);
+      color: #fecaca;
+      border: 1px solid rgba(248,113,113,0.65);
+    }
+
+    /* Trading Levels Styling */
+    .price-cell {
+      font-weight: 700;
+      color: var(--accent);
+      font-size: 0.95rem;
+    }
+
+    .sl-cell {
+      color: var(--danger);
+      font-weight: 600;
+    }
+
+    .target-cell {
+      color: var(--success);
+      font-weight: 600;
+    }
+
+    .rr-cell {
+      font-weight: 600;
+    }
+
+    .rr-good {
+      color: var(--success);
+    }
+
+    .rr-medium {
+      color: var(--warning);
+    }
+
+    .rr-poor {
+      color: var(--danger);
+    }
+
+    /* Show All Button */
+    .show-all-btn {
+      margin: 10px 0;
+      padding: 10px 20px;
+      background: linear-gradient(135deg, var(--accent), #6366f1);
+      color: white;
+      border: none;
+      border-radius: 25px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.3s;
+    }
+
+    .show-all-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 20px rgba(56,189,248,0.4);
+    }
+
+    .status-banner {
+      margin-top: 10px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding: 10px;
+      background: rgba(15,23,42,0.6);
+      border-radius: 8px;
+      border-left: 3px solid var(--accent);
+    }
+
+    .status-banner span {
+      color: var(--accent);
+      font-weight: 500;
+    }
+
+    .side-card {
+      margin-bottom: 10px;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .chip {
+      border-radius: 999px;
+      border: 1px solid rgba(148,163,184,0.7);
+      padding: 4px 11px;
+      font-size: 0.74rem;
+      cursor: pointer;
+      background: radial-gradient(circle at top left, rgba(59,130,246,0.25), rgba(15,23,42,0.95));
+      color: #e0f2fe;
+      box-shadow: 0 8px 18px rgba(15,23,42,0.7);
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+
+    .chip:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 22px rgba(15,23,42,0.9);
+    }
+
+    .chip strong {
+      color: #f9fafb;
+      font-weight: 600;
+    }
+
+    .help-box {
+      font-size: 0.77rem;
+      color: var(--muted);
+      border-radius: var(--radius-sm);
+      border: 1px dashed rgba(148,163,184,0.7);
+      padding: 8px 10px;
+      background: rgba(15,23,42,0.9);
+    }
+
+    .help-box ul {
+      padding-left: 18px;
+      margin: 6px 0 0;
+    }
+
+    .pagination {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      margin-top: 15px;
+      padding: 10px;
+    }
+
+    .pagination button {
+      padding: 8px 16px;
+      background: rgba(15,23,42,0.9);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+
+    .pagination button:hover:not(:disabled) {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .pagination button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .pagination span {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <h1>⚡ Momentum Dashboard Pro</h1>
-        <p class="subtitle">Strategy-Based Trading | Portfolio Tracking</p>
+  <div class="page">
+    <header>
+      <div class="title-block">
+        <h1>
+          ⚡ Momentum Dashboard Pro
+          <span class="tag-pill">Enhanced Trading Signals</span>
+        </h1>
+        <p class="subtitle">
+          Cloud-hosted with auto-updates, trading levels (Entry/SL/Target), and complete signal analysis
+        </p>
         
-        <div class="card">
-            <h2 style="margin-bottom: 20px; color: var(--accent);">📊 Data Control Panel</h2>
-            
-            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                <button class="btn btn-upload" onclick="document.getElementById('fileInput').click()">📤 Upload JSON</button>
-                <button class="btn" onclick="refreshDemo()">🔄 Refresh Demo</button>
-                <button class="btn btn-success" onclick="openAddTradeModal()">➕ Add Trade</button>
-            </div>
-            <input type="file" id="fileInput" accept=".json" onchange="uploadFile(event)">
-            
-            <div class="info-grid">
-                <div class="info-box">
-                    <div class="info-label">Last Updated</div>
-                    <div class="info-value" id="lastUpdate" style="font-size: 1.2rem;">--:--</div>
-                </div>
-                <div class="info-box">
-                    <div class="info-label">Total Signals</div>
-                    <div class="info-value" id="recordCount">0</div>
-                </div>
-                <div class="info-box">
-                    <div class="info-label">Portfolio Trades</div>
-                    <div class="info-value" id="portfolioCount">0</div>
-                </div>
-                <div class="info-box">
-                    <div class="info-label">P&L</div>
-                    <div class="info-value" id="totalPnL" style="font-size: 1.3rem;">₹0</div>
-                </div>
-                <div class="info-box">
-                    <div class="info-label">Data Source</div>
-                    <div class="info-value" id="dataSource" style="font-size: 0.9rem;">Demo</div>
-                </div>
-            </div>
+        <!-- Market Cap Quick Filters -->
+        <div class="mcap-filters">
+          <button class="mcap-btn active" data-mcap="all">🌟 All Caps</button>
+          <button class="mcap-btn" data-mcap="Large Cap">🏢 Large Cap</button>
+          <button class="mcap-btn" data-mcap="Mid Cap">🏭 Mid Cap</button>
+          <button class="mcap-btn" data-mcap="Small Cap">🚀 Small Cap</button>
         </div>
         
-        <div class="card">
-            <div class="tabs">
-                <div class="tab active" onclick="switchTab('all')">All Signals</div>
-                <div class="tab" onclick="switchTab('intraday')">🔴 Intraday</div>
-                <div class="tab" onclick="switchTab('swing')">🟠 Swing</div>
-                <div class="tab" onclick="switchTab('positional')">🟢 Positional</div>
-                <div class="tab" onclick="switchTab('portfolio')">💼 Portfolio</div>
-            </div>
-            
-            <div id="tab-all" class="tab-content active">
-                <h3 style="color: var(--accent); margin-bottom: 15px;">All Trading Signals</h3>
-                <div style="overflow-x: auto;">
-                    <table id="allTable">
-                        <thead>
-                            <tr>
-                                <th>Symbol</th>
-                                <th>Strategy</th>
-                                <th>Sector</th>
-                                <th>Market Cap</th>
-                                <th>Price</th>
-                                <th>Change %</th>
-                                <th>Date</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="allTableBody">
-                            <tr><td colspan="8" style="text-align: center; padding: 40px;">Loading...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            
-            <div id="tab-intraday" class="tab-content">
-                <h3 style="color: #ff4466; margin-bottom: 15px;">🔴 Intraday Signals</h3>
-                <div style="overflow-x: auto;">
-                    <table><thead><tr><th>Symbol</th><th>Price</th><th>Change %</th><th>Date</th><th>Action</th></tr></thead>
-                    <tbody id="intradayTableBody"></tbody></table>
-                </div>
-            </div>
-            
-            <div id="tab-swing" class="tab-content">
-                <h3 style="color: #ffa500; margin-bottom: 15px;">🟠 Swing Signals</h3>
-                <div style="overflow-x: auto;">
-                    <table><thead><tr><th>Symbol</th><th>Price</th><th>Change %</th><th>Date</th><th>Action</th></tr></thead>
-                    <tbody id="swingTableBody"></tbody></table>
-                </div>
-            </div>
-            
-            <div id="tab-positional" class="tab-content">
-                <h3 style="color: #00ff88; margin-bottom: 15px;">🟢 Positional Signals</h3>
-                <div style="overflow-x: auto;">
-                    <table><thead><tr><th>Symbol</th><th>Price</th><th>Change %</th><th>Date</th><th>Action</th></tr></thead>
-                    <tbody id="positionalTableBody"></tbody></table>
-                </div>
-            </div>
-            
-            <div id="tab-portfolio" class="tab-content">
-                <h3 style="color: var(--accent); margin-bottom: 15px;">💼 My Portfolio</h3>
-                <div style="overflow-x: auto;">
-                    <table><thead><tr><th>Symbol</th><th>Type</th><th>Buy Price</th><th>Qty</th><th>Current Price</th><th>P&L</th><th>Date</th><th>Action</th></tr></thead>
-                    <tbody id="portfolioTableBody"></tbody></table>
-                </div>
-            </div>
+        <div class="tabs" id="modeTabs">
+          <button class="tab-btn active" data-mode="intraday">
+            <span class="icon">⚡</span> Intraday (1h / 4h)
+          </button>
+          <button class="tab-btn" data-mode="swing">
+            <span class="icon">📈</span> Swing (1–3 days)
+          </button>
+          <button class="tab-btn" data-mode="positional">
+            <span class="icon">🧭</span> Positional (5–15 days)
+          </button>
         </div>
-    </div>
-    
-    <!-- Add Trade Modal -->
-    <div id="addTradeModal" class="modal">
-        <div class="modal-content">
-            <h2 style="margin-bottom: 20px; color: var(--accent);">➕ Add Trade</h2>
-            <form onsubmit="addTrade(event)">
-                <div class="form-group">
-                    <label>Symbol</label>
-                    <input type="text" id="tradeSymbol" required>
-                </div>
-                <div class="form-group">
-                    <label>Type</label>
-                    <select id="tradeType" required>
-                        <option value="buy">Buy</option>
-                        <option value="sell">Sell</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Price</label>
-                    <input type="number" step="0.01" id="tradePrice" required>
-                </div>
-                <div class="form-group">
-                    <label>Quantity</label>
-                    <input type="number" id="tradeQty" required>
-                </div>
-                <div class="form-group">
-                    <label>Strategy</label>
-                    <select id="tradeStrategy">
-                        <option value="Intraday">Intraday</option>
-                        <option value="Swing">Swing</option>
-                        <option value="Positional">Positional</option>
-                    </select>
-                </div>
-                <div style="display: flex; gap: 10px; margin-top: 30px;">
-                    <button type="submit" class="btn btn-success" style="flex: 1;">Add Trade</button>
-                    <button type="button" class="btn btn-danger" onclick="closeAddTradeModal()" style="flex: 1;">Cancel</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    
-    <script>
-        let allData = [];
-        let portfolioData = [];
-        
-        function showNotification(message, isError = false) {
-            const notif = document.createElement('div');
-            notif.className = 'notification';
-            notif.style.borderColor = isError ? '#ff4466' : '#00ff88';
-            notif.textContent = message;
-            document.body.appendChild(notif);
-            setTimeout(() => notif.remove(), 4000);
-        }
-        
-        function switchTab(tabName) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
-            document.getElementById('tab-' + tabName).classList.add('active');
-        }
-        
-        function openAddTradeModal() {
-            document.getElementById('addTradeModal').classList.add('active');
-        }
-        
-        function closeAddTradeModal() {
-            document.getElementById('addTradeModal').classList.remove('active');
-        }
-        
-        async function addTrade(event) {
-            event.preventDefault();
-            const trade = {
-                symbol: document.getElementById('tradeSymbol').value,
-                type: document.getElementById('tradeType').value,
-                price: parseFloat(document.getElementById('tradePrice').value),
-                qty: parseInt(document.getElementById('tradeQty').value),
-                strategy: document.getElementById('tradeStrategy').value
-            };
-            
-            try {
-                const res = await fetch('/api/portfolio', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(trade)
-                });
-                const result = await res.json();
-                showNotification('✅ Trade added successfully!');
-                closeAddTradeModal();
-                loadData();
-            } catch (err) {
-                showNotification('❌ Error adding trade', true);
-            }
-        }
-        
-        async function deleteTrade(id) {
-            if (!confirm('Delete this trade?')) return;
-            try {
-                await fetch(`/api/portfolio?id=${id}`, {method: 'DELETE'});
-                showNotification('✅ Trade deleted');
-                loadData();
-            } catch (err) {
-                showNotification('❌ Error deleting trade', true);
-            }
-        }
-        
-        function addToPortfolio(symbol, price, strategy) {
-            document.getElementById('tradeSymbol').value = symbol;
-            document.getElementById('tradePrice').value = price;
-            document.getElementById('tradeStrategy').value = strategy;
-            openAddTradeModal();
-        }
-        
-        async function loadData() {
-            try {
-                const res = await fetch('/api/data');
-                const json = await res.json();
-                
-                allData = json.data || [];
-                portfolioData = json.portfolio || [];
-                
-                // Update stats
-                const lastUpdateDate = new Date(json.last_update);
-                document.getElementById('lastUpdate').textContent = lastUpdateDate.toLocaleTimeString();
-                document.getElementById('recordCount').textContent = json.count;
-                document.getElementById('portfolioCount').textContent = portfolioData.length;
-                document.getElementById('dataSource').textContent = json.data_source || 'Demo';
-                
-                // Calculate P&L
-                let totalPnL = 0;
-                portfolioData.forEach(trade => {
-                    if (trade.type === 'buy') {
-                        const currentPrice = parseFloat(trade.price) * 1.02; // Mock 2% gain
-                        totalPnL += (currentPrice - trade.price) * trade.qty;
-                    }
-                });
-                const pnlEl = document.getElementById('totalPnL');
-                pnlEl.textContent = `₹${totalPnL.toFixed(0)}`;
-                pnlEl.style.color = totalPnL >= 0 ? '#00ff88' : '#ff4466';
-                
-                // Render tables
-                renderAllTable();
-                renderStrategyTable('intraday', 'Intraday');
-                renderStrategyTable('swing', 'Swing');
-                renderStrategyTable('positional', 'Positional');
-                renderPortfolioTable();
-                
-            } catch (err) {
-                console.error('Load error:', err);
-            }
-        }
-        
-        function renderAllTable() {
-            const tbody = document.getElementById('allTableBody');
-            if (!allData || allData.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;">No data</td></tr>';
-                return;
-            }
-            
-            const uniqueSymbols = new Map();
-            allData.forEach(row => {
-                if (!uniqueSymbols.has(row.symbol)) uniqueSymbols.set(row.symbol, row);
-            });
-            
-            const rows = Array.from(uniqueSymbols.values()).slice(0, 20).map(row => {
-                const price = parseFloat(row.price || 0);
-                const change = row.change_pct || 0;
-                const strategyBadge = `<span class="badge badge-${row.strategy?.toLowerCase() || 'swing'}">${row.strategy || 'Swing'}</span>`;
-                
-                return `<tr>
-                    <td><strong>${row.symbol}</strong></td>
-                    <td>${strategyBadge}</td>
-                    <td>${row.sector || 'N/A'}</td>
-                    <td>${row.marketcapname || 'N/A'}</td>
-                    <td><strong style="color: var(--accent);">₹${price.toFixed(2)}</strong></td>
-                    <td style="color: ${change >= 0 ? '#00ff88' : '#ff4466'}">${change >= 0 ? '+' : ''}${change}%</td>
-                    <td style="font-size: 0.85rem;">${row.date || 'N/A'}</td>
-                    <td><button class="btn" style="padding: 6px 12px; font-size: 0.8rem;" onclick="addToPortfolio('${row.symbol}', ${price}, '${row.strategy}')">Add</button></td>
-                </tr>`;
-            }).join('');
-            
-            tbody.innerHTML = rows;
-        }
-        
-        function renderStrategyTable(strategy, strategyName) {
-            const tbody = document.getElementById(strategy + 'TableBody');
-            const filtered = allData.filter(r => r.strategy === strategyName);
-            
-            if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">No signals</td></tr>';
-                return;
-            }
-            
-            const uniqueSymbols = new Map();
-            filtered.forEach(row => {
-                if (!uniqueSymbols.has(row.symbol)) uniqueSymbols.set(row.symbol, row);
-            });
-            
-            const rows = Array.from(uniqueSymbols.values()).slice(0, 15).map(row => {
-                const price = parseFloat(row.price || 0);
-                const change = row.change_pct || 0;
-                
-                return `<tr>
-                    <td><strong>${row.symbol}</strong></td>
-                    <td><strong style="color: var(--accent);">₹${price.toFixed(2)}</strong></td>
-                    <td style="color: ${change >= 0 ? '#00ff88' : '#ff4466'}">${change >= 0 ? '+' : ''}${change}%</td>
-                    <td style="font-size: 0.85rem;">${row.date || 'N/A'}</td>
-                    <td><button class="btn" style="padding: 6px 12px; font-size: 0.8rem;" onclick="addToPortfolio('${row.symbol}', ${price}, '${strategyName}')">Add</button></td>
-                </tr>`;
-            }).join('');
-            
-            tbody.innerHTML = rows;
-        }
-        
-        function renderPortfolioTable() {
-            const tbody = document.getElementById('portfolioTableBody');
-            
-            if (portfolioData.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;">No trades yet</td></tr>';
-                return;
-            }
-            
-            const rows = portfolioData.map(trade => {
-                const currentPrice = trade.price * 1.02; // Mock current price
-                const pnl = (currentPrice - trade.price) * trade.qty;
-                const pnlColor = pnl >= 0 ? '#00ff88' : '#ff4466';
-                
-                return `<tr>
-                    <td><strong>${trade.symbol}</strong></td>
-                    <td><span class="badge badge-${trade.type === 'buy' ? 'positional' : 'intraday'}">${trade.type.toUpperCase()}</span></td>
-                    <td>₹${trade.price.toFixed(2)}</td>
-                    <td>${trade.qty}</td>
-                    <td>₹${currentPrice.toFixed(2)}</td>
-                    <td style="color: ${pnlColor}; font-weight: 700;">${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}</td>
-                    <td style="font-size: 0.85rem;">${new Date(trade.timestamp).toLocaleDateString()}</td>
-                    <td><button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.8rem;" onclick="deleteTrade(${trade.id})">×</button></td>
-                </tr>`;
-            }).join('');
-            
-            tbody.innerHTML = rows;
-        }
-        
-        async function uploadFile(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            
-            showNotification('Uploading file...');
-            
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const data = JSON.parse(e.target.result);
-                    
-                    const res = await fetch('/api/upload', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(data)
-                    });
-                    
-                    const result = await res.json();
-                    
-                    if (result.status === 'success') {
-                        showNotification('✅ Upload successful! ' + result.count + ' records');
-                        setTimeout(() => loadData(), 500);
-                    } else {
-                        showNotification('❌ ' + result.message, true);
-                    }
-                } catch (err) {
-                    showNotification('❌ Error: ' + err.message, true);
-                }
-            };
-            reader.readAsText(file);
-            event.target.value = '';
-        }
-        
-        async function refreshDemo() {
-            try {
-                const res = await fetch('/api/refresh-demo', { method: 'POST' });
-                const json = await res.json();
-                showNotification(json.message);
-                setTimeout(() => loadData(), 500);
-            } catch (err) {
-                showNotification('Error refreshing demo', true);
-            }
-        }
-        
-        // Auto-refresh every 30 seconds
-        window.addEventListener('DOMContentLoaded', () => {
-            loadData();
-            setInterval(loadData, 30000);
-        });
-        
-        // Close modal on outside click
-        document.getElementById('addTradeModal').addEventListener('click', (e) => {
-            if (e.target.id === 'addTradeModal') closeAddTradeModal();
-        });
-    </script>
-</body>
-</html>
-"""
+      </div>
+    </header>
 
-if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    <div class="status-banner" id="statusBanner">
+      <span>●</span> Loading data from cloud...
+    </div>
+
+    <div class="grid">
+      <!-- Main area -->
+      <div>
+        <div class="card" id="mainCard">
+          <div class="card-header">
+            <div>
+              <div class="card-title">
+                <span class="dot"></span>
+                <span id="mainCardTitle">Intraday Momentum Radar (1h / 4h)</span>
+              </div>
+              <div class="card-subtitle" id="mainCardSubtitle">
+                Complete trading signals with entry, stop loss, and target levels calculated automatically
+              </div>
+            </div>
+          </div>
+
+          <div class="summary-row" id="summaryRow">
+            <!-- Summary cards injected by JS -->
+          </div>
+
+          <div class="filters" id="filtersRow">
+            <!-- Filters injected by JS -->
+          </div>
+
+          <div class="table-wrapper">
+            <table>
+              <thead id="tableHead">
+                <!-- Head injected by JS -->
+              </thead>
+              <tbody id="tableBody">
+                <tr><td colspan="12" style="text-align: center; padding: 40px;">Loading signals...</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination" id="pagination">
+            <button id="prevBtn">← Previous</button>
+            <span id="pageInfo">Page 1 of 1</span>
+            <button id="nextBtn">Next →</button>
+            <button id="showAllBtn" class="show-all-btn">Show All Signals</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Side area -->
+      <div>
+        <div class="card side-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="dot"></span>
+              <span id="sideTitle">Quick Stats</span>
+            </div>
+          </div>
+          <div id="sideContent">
+            <div class="chip-row" id="chipRow">
+              <!-- Stats injected -->
+            </div>
+          </div>
+        </div>
+
+        <div class="help-box" id="helpBox">
+          <strong>📊 Trading Levels Explained</strong>
+          <ul>
+            <li><strong style="color: var(--accent)">Entry:</strong> Current market price</li>
+            <li><strong style="color: var(--danger)">Stop Loss:</strong> Risk management level (2-5% below entry)</li>
+            <li><strong style="color: var(--success)">Target:</strong> Profit booking level (based on R:R ratio)</li>
+            <li><strong>R:R Ratio:</strong> Risk-Reward ratio (Good: 2+, Medium: 1.5-2, Poor: <1.5)</li>
+          </ul>
+          <br>
+          <strong>🎯 How to Use</strong>
+          <ul>
+            <li>Filter by market cap using buttons at top</li>
+            <li>Choose your trading timeframe (Intraday/Swing/Positional)</li>
+            <li>Sort columns by clicking headers</li>
+            <li>Click symbol to open TradingView chart</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ======== Utility functions ========
+    function parseCustomDate(str) {
+      if (!str) return null;
+      const parts = str.split(" ");
+      if (parts.length < 3) return null;
+      const [datePart, timePart, ampmRaw] = parts;
+      const [d, m, y] = datePart.split("-").map(Number);
+      let [h, min] = timePart.split(":").map(Number);
+      const ampm = (ampmRaw || '').toLowerCase();
+      if (ampm === "pm" && h !== 12) h += 12;
+      if (ampm === "am" && h === 12) h = 0;
+      return new Date(y, m - 1, d, h, min);
+    }
+
+    function formatDateOnly(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, "0");
+      const d = String(date.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+
+    function getUnique(arr) {
+      return Array.from(new Set(arr));
+    }
+
+    function groupBy(arr, keyFn) {
+      const map = new Map();
+      for (const item of arr) {
+        const key = keyFn(item);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(item);
+      }
+      return map;
+    }
+
+    // Calculate trading levels
+    function calculateTradingLevels(price, mode) {
+      const p = parseFloat(price);
+      let slPercent, targetMultiplier;
+      
+      if (mode === 'intraday') {
+        slPercent = 0.02; // 2% SL for intraday
+        targetMultiplier = 2; // 1:2 R:R
+      } else if (mode === 'swing') {
+        slPercent = 0.03; // 3% SL for swing
+        targetMultiplier = 2.5; // 1:2.5 R:R
+      } else {
+        slPercent = 0.05; // 5% SL for positional
+        targetMultiplier = 3; // 1:3 R:R
+      }
+      
+      const sl = p * (1 - slPercent);
+      const risk = p - sl;
+      const target = p + (risk * targetMultiplier);
+      const rr = (target - p) / (p - sl);
+      
+      return {
+        entry: p.toFixed(2),
+        sl: sl.toFixed(2),
+        target: target.toFixed(2),
+        rr: rr.toFixed(2)
+      };
+    }
+
+    // ======== Global state ========
+    const state = {
+      raw: [],
+      dates: [],
+      mode: "intraday",
+      selectedMcap: "all",
+      currentPage: 1,
+      itemsPerPage: 50,
+      showAll: false,
+      aggregates: {
+        intraday: [],
+        swing: [],
+        positional: []
+      },
+      filters: {
+        sector: "all",
+        marketcap: "all",
+        min_hits: 0,
+        min_swing_days: 0,
+        min_days_in_trend: 0
+      },
+      sort: {
+        field: null,
+        direction: "desc"
+      }
+    };
+
+    // ======== Aggregation logic ========
+    function preprocessRaw(json) {
+      const rows = [];
+      for (const r of json) {
+        const dt = parseCustomDate(r.date);
+        if (!dt) continue;
+        const date_only = formatDateOnly(dt);
+        const hour = dt.getHours();
+        
+        // Extract price from various possible fields
+        let price = r.close || r.Close || r.ltp || r.LTP || r.price || r.Price || r['last price'] || r['Last Price'] || '0';
+        if (typeof price === 'string') {
+          price = price.replace(/[₹,\s]/g, '').trim();
+        }
+        
+        rows.push({
+          ...r,
+          _dt: dt,
+          _dateOnly: date_only,
+          _hour: hour,
+          symbol: r.symbol || r.Symbol || 'N/A',
+          sector: r.sector || r.Sector || 'Other',
+          marketcapname: r.marketcapname || r.marketCapName || r['Market Cap'] || 'Unknown',
+          price: price
+        });
+      }
+      rows.sort((a, b) => a._dt - b._dt);
+      state.raw = rows;
+      state.dates = getUnique(rows.map(r => r._dateOnly));
+    }
+
+    function aggregateIntraday() {
+      const rows = state.raw;
+      if (!rows.length) return [];
+      const lastDate = state.dates[state.dates.length - 1];
+      const subset = rows.filter(r => r._dateOnly === lastDate);
+      const bySymbol = groupBy(subset, r => r.symbol);
+
+      const result = [];
+      for (const [symbol, list] of bySymbol.entries()) {
+        const hours = getUnique(list.map(r => r._hour));
+        const hits_1h = hours.length;
+        const buckets = new Set();
+        for (const h of hours) {
+          const bucket = Math.floor((h - 9) / 4);
+          buckets.add(bucket);
+        }
+        const hits_4h = buckets.size;
+        const sample = list[list.length - 1]; // Get latest
+        result.push({
+          symbol,
+          sector: sample.sector,
+          marketcapname: sample.marketcapname,
+          price: sample.price,
+          hits_1h,
+          hits_4h,
+          total_hits: hits_1h + hits_4h
+        });
+      }
+      return result.sort((a, b) => b.total_hits - a.total_hits);
+    }
+
+    function aggregateSwing(daysBack = 3) {
+      const rows = state.raw;
+      if (!rows.length) return [];
+      const uniqueDates = state.dates;
+      const lastDates = uniqueDates.slice(-daysBack);
+      if (!lastDates.length) return [];
+
+      const bySymbol = groupBy(
+        rows.filter(r => lastDates.includes(r._dateOnly)),
+        r => r.symbol
+      );
+
+      const last = lastDates[lastDates.length - 1];
+      const result = [];
+
+      for (const [symbol, list] of bySymbol.entries()) {
+        const sample = list[list.length - 1];
+        const byDate = groupBy(list, r => r._dateOnly);
+        const hits_1d = (byDate.get(last) || []).length;
+        const lastTwo = lastDates.slice(-2);
+        const hits_2d = lastTwo.reduce((acc, d) => acc + ((byDate.get(d) || []).length), 0);
+        const hits_3d = lastDates.reduce((acc, d) => acc + ((byDate.get(d) || []).length), 0);
+
+        let consec = 0;
+        for (let i = lastDates.length - 1; i >= 0; i--) {
+          const d = lastDates[i];
+          const count = (byDate.get(d) || []).length;
+          if (count > 0) consec += 1;
+          else break;
+        }
+
+        result.push({
+          symbol,
+          sector: sample.sector,
+          marketcapname: sample.marketcapname,
+          price: sample.price,
+          hits_1d,
+          hits_2d,
+          hits_3d,
+          consec_days: consec
+        });
+      }
+
+      return result.sort((a, b) => b.hits_3d - a.hits_3d);
+    }
+
+    function aggregatePositional() {
+      const rows = state.raw;
+      if (!rows.length) return [];
+      const uniqueDates = state.dates;
+      if (!uniqueDates.length) return [];
+
+      const last15 = uniqueDates.slice(-15);
+      const bySymbol = groupBy(
+        rows.filter(r => last15.includes(r._dateOnly)),
+        r => r.symbol
+      );
+
+      const result = [];
+      for (const [symbol, list] of bySymbol.entries()) {
+        const sample = list[list.length - 1];
+        const byDate = groupBy(list, r => r._dateOnly);
+        const hits_5dDates = last15.slice(-5);
+        const hits_7dDates = last15.slice(-7);
+        const hits_5d = hits_5dDates.reduce((acc, d) => acc + ((byDate.get(d) || []).length), 0);
+        const hits_7d = hits_7dDates.reduce((acc, d) => acc + ((byDate.get(d) || []).length), 0);
+        const hits_15d = last15.reduce((acc, d) => acc + ((byDate.get(d) || []).length), 0);
+
+        const lastForTrend = last15.slice(-10);
+        let daysInTrend = 0;
+        for (const d of lastForTrend) {
+          if ((byDate.get(d) || []).length > 0) daysInTrend++;
+        }
+
+        result.push({
+          symbol,
+          sector: sample.sector,
+          marketcapname: sample.marketcapname,
+          price: sample.price,
+          hits_5d,
+          hits_7d,
+          hits_15d,
+          days_in_trend: daysInTrend
+        });
+      }
+
+      return result.sort((a, b) => b.hits_15d - a.hits_15d);
+    }
+
+    function recomputeAggregates() {
+      state.aggregates.intraday = aggregateIntraday();
+      state.aggregates.swing = aggregateSwing(3);
+      state.aggregates.positional = aggregatePositional();
+    }
+
+    // ======== Filtering ========
+    function filteredAggregates(mode) {
+      let agg = state.aggregates[mode] || [];
+      const { sector, marketcap, min_hits, min_swing_days, min_days_in_
