@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Momentum Dashboard – Enhanced Trading Signals</title>
+  <title>Momentum Dashboard Enhanced Trading Signals</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
